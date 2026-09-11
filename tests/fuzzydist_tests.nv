@@ -1,0 +1,152 @@
+// fuzzydist_tests.nv — the classic distances, and the two things
+// libraries usually get wrong about them.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: fuzzy-nv.<module>.<fn>`.
+//
+// THE VECTORS ARE THE PUBLISHED ONES: `kitten`/`sitting` is
+// Levenshtein's own example, `MARTHA`/`MARHTA` is Winkler's, and
+// `ca`/`abc` is the pair that separates the two Damerau distances —
+// the pair most libraries answer wrongly under one of the two names.
+// rapidfuzz's own test values back the ratios.
+//
+// THE TWO ASSERTIONS THIS SUITE EXISTS FOR: the bounded form answers
+// None rather than a number when the distance exceeds the bound, and
+// every distance is counted in grapheme clusters rather than bytes.
+
+use std.test
+use std.list
+use fuzzydist
+
+@test
+fn test_levenshtein_is_levenshteins_own_example() [io]
+    test.case("kitten to sitting is 3")
+    test.assert(fuzzydist.levenshtein("kitten", "sitting") == 3)
+
+    test.case("a string to itself is 0")
+    test.assert(fuzzydist.levenshtein("same", "same") == 0)
+
+    test.case("a string to nothing is its cluster count")
+    test.assert(fuzzydist.levenshtein("abc", "") == 3)
+
+    test.case("and it is symmetric")
+    test.assert(fuzzydist.levenshtein("sitting", "kitten") == 3)
+
+@test
+fn test_the_bounded_form_stops_rather_than_finishing() [io]
+    test.case("within the bound, the distance itself")
+    match fuzzydist.levenshtein_within("comit", "commit", 2)
+        Some(d) => test.assert(d == 1)
+        None    => test.assert(false)
+
+    test.case("past it, None — not a clamped number a caller would compare")
+    match fuzzydist.levenshtein_within("kitten", "sitting", 2)
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+
+    test.case("a bound of 0 is an equality test")
+    test.assert(fuzzydist.levenshtein_within("a", "a", 0) == Some(0))
+    test.assert(fuzzydist.levenshtein_within("a", "b", 0) == None)
+
+    test.case("the bounded and unbounded forms agree inside the bound")
+    test.assert(fuzzydist.levenshtein_within("kitten", "sitting", 5) == Some(3))
+
+    test.case("osa has a bounded form too, for the same reason")
+    test.assert(fuzzydist.osa_within("ab", "ba", 1) == Some(1))
+
+@test
+fn test_the_two_damerau_distances_are_different_and_both_are_named() [io]
+    test.case("osa of ca to abc is 3 — it may not edit a substring twice")
+    test.assert(fuzzydist.osa("ca", "abc") == 3)
+
+    test.case("unrestricted damerau of the same pair is 2")
+    test.assert(fuzzydist.damerau("ca", "abc") == 2)
+
+    test.case("and both are 1 for a plain adjacent transposition")
+    test.assert(fuzzydist.osa("ab", "ba") == 1)
+    test.assert(fuzzydist.damerau("ab", "ba") == 1)
+
+    test.case("which Levenshtein, with no transposition, calls 2")
+    test.assert(fuzzydist.levenshtein("ab", "ba") == 2)
+
+@test
+fn test_hamming_refuses_unequal_lengths_rather_than_inventing_an_answer() [io]
+    test.case("equal lengths give the count of differing clusters")
+    test.assert(fuzzydist.hamming("karolin", "kathrin") == Some(3))
+
+    test.case("unequal lengths give None — Hamming is not defined for them")
+    test.assert(fuzzydist.hamming("abc", "ab") == None)
+
+@test
+fn test_jaro_and_winkler_are_winklers_own_numbers() [io]
+    test.case("jaro of MARTHA and MARHTA is about 0.944")
+    let j = fuzzydist.jaro("MARTHA", "MARHTA")
+    test.assert(j > 0.94 and j < 0.95)
+
+    test.case("winkler's prefix bonus raises it to about 0.961")
+    let jw = fuzzydist.jaro_winkler("MARTHA", "MARHTA")
+    test.assert(jw > 0.96 and jw < 0.97)
+
+    test.case("identical strings are 1.0")
+    test.assert(fuzzydist.jaro_winkler("same", "same") > 0.999)
+
+    test.case("nothing in common is 0.0")
+    test.assert(fuzzydist.jaro("abc", "xyz") < 0.001)
+
+    test.case("the constants can be supplied, for a corpus the surnames do not describe")
+    let tuned = fuzzydist.jaro_winkler_with("MARTHA", "MARHTA", 0.2, 4)
+    test.assert(tuned > jw)
+
+@test
+fn test_the_ratios_are_rapidfuzzs() [io]
+    test.case("ratio is the normalised indel similarity, in 0 to 1")
+    let r = fuzzydist.ratio("this is a test", "this is a test!")
+    test.assert(r > 0.96 and r <= 1.0)
+
+    test.case("partial_ratio finds a short needle inside a long haystack")
+    test.assert(fuzzydist.partial_ratio("test", "this is a test string") > 0.99)
+
+    test.case("and plain ratio does not, because the lengths differ")
+    test.assert(fuzzydist.ratio("test", "this is a test string") < 0.5)
+
+    test.case("token_sort_ratio makes a reordered name the same name")
+    test.assert(fuzzydist.token_sort_ratio("Klaus Hagen", "Hagen Klaus") > 0.99)
+
+    test.case("token_set_ratio survives an extra token")
+    test.assert(fuzzydist.token_set_ratio("Klaus Hagen", "Klaus H Hagen") > 0.99)
+
+    test.case("lcs_length and indel are the pieces underneath")
+    test.assert(fuzzydist.lcs_length("abcde", "ace") == 3)
+    test.assert(fuzzydist.indel("abcde", "ace") == 2)
+
+@test
+fn test_a_did_you_mean_is_one_call_over_the_bounded_distance() [io]
+    let commands = ["commit", "checkout", "clone", "config"]
+
+    test.case("the near miss comes back and the far ones do not")
+    let near = fuzzydist.nearest("comit", commands, 2, 3)
+    test.assert(list.len(near) == 1)
+    test.assert(near[0] == 0)
+
+    test.case("a typo close to two commands answers both, best first")
+    let two = fuzzydist.nearest("clon", commands, 2, 3)
+    test.assert(list.len(two) >= 1)
+    test.assert(two[0] == 2)
+
+    test.case("nothing close answers nothing — rather than the least bad guess")
+    test.assert(list.len(fuzzydist.nearest("xyzzy", commands, 2, 3)) == 0)
+
+@test
+fn test_the_unit_is_a_grapheme_cluster_and_not_a_byte() [io]
+    // "e" + U+0301 COMBINING ACUTE ACCENT is one cluster and three
+    // bytes; an edit distance counted in bytes would say two edits.
+    let accented = "cafe\u{0301}"
+
+    test.case("cluster_count counts characters, where str.len counts bytes")
+    test.assert(fuzzydist.cluster_count(accented) == 4)
+
+    test.case("one substitution away is ONE edit, not two")
+    test.assert(fuzzydist.levenshtein(accented, "cafx") == 1)
+
+    test.case("and a weighted distance charges the cost the caller named")
+    test.assert(fuzzydist.levenshtein_weighted("ab", "a", 1, 5, 1) == 5)

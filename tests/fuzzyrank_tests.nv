@@ -1,0 +1,134 @@
+// fuzzyrank_tests.nv — the order, and the fact that it is total.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: fuzzy-nv.<module>.<fn>`.
+//
+// THE VECTORS ARE fzf's `--tiebreak` behaviour, and the counting case
+// is novim's picker footer.
+//
+// THE ASSERTION THIS SUITE EXISTS FOR: `compare` is never zero for two
+// different candidates. A picker repaints on every keystroke, and two
+// rows that swap places between repaints open the wrong file.
+
+use std.test
+use std.list
+use fuzzypat
+use fuzzyscore
+use fuzzyrank
+
+fn corpus() -> [Str]
+    ["src/main.nv", "src/manual.md", "docs/manual.md", "src/map.nv", "README.md"]
+
+fn pat(needle: Str) -> fuzzypat.FuzzyPattern
+    fuzzypat.literal(needle, FuzzyCaseSmart)
+
+@test
+fn test_a_ranking_answers_indices_and_never_the_strings() [io]
+    let hits = fuzzyrank.rank(pat("man"), corpus(), fuzzyrank.default_options())
+
+    test.case("three candidates hold the subsequence")
+    test.assert(list.len(hits) == 3)
+
+    test.case("every result is an index into the caller's own list")
+    for h in hits
+        test.assert(h.index >= 0)
+        test.assert(h.index < list.len(corpus()))
+
+    test.case("and it carries the match, so a caller highlights without scoring again")
+    test.assert(hits[0].matched.score > 0)
+
+@test
+fn test_the_order_is_total_and_the_last_step_is_the_input_index() [io]
+    // Two candidates that score identically under every rule but the
+    // last: same length, same match position, same bonuses.
+    let same = ["ab_cd", "ab_ce"]
+    let hits = fuzzyrank.rank(pat("ab"), same, fuzzyrank.default_options())
+
+    test.case("both match")
+    test.assert(list.len(hits) == 2)
+
+    test.case("they come out in producer order, because the index is the final tiebreak")
+    test.assert(hits[0].index == 0)
+    test.assert(hits[1].index == 1)
+
+    test.case("COMPARE IS NEVER ZERO FOR TWO DIFFERENT CANDIDATES — the whole point")
+    test.assert(fuzzyrank.compare(hits[0], hits[1], same, FuzzyTieLength) != 0)
+    test.assert(fuzzyrank.compare(hits[0], hits[1], same, FuzzyTieIndex) != 0)
+    test.assert(fuzzyrank.compare(hits[0], hits[1], same, FuzzyTieBegin) != 0)
+    test.assert(fuzzyrank.compare(hits[0], hits[1], same, FuzzyTieEnd) != 0)
+
+@test
+fn test_the_tiebreaks_are_fzfs() [io]
+    let cands = ["a_long_candidate_x", "a_x"]
+
+    test.case("length: the shorter one wins, which is fzf's default and right for paths")
+    let by_len = fuzzyrank.rank(pat("ax"), cands, fuzzyrank.default_options())
+    test.assert(by_len[0].index == 1)
+
+    test.case("index: producer order survives instead")
+    let o = FuzzyRankOptions { bonus: fuzzyscore.fzf_bonus(),
+                               scorer: FuzzyScorerV2,
+                               tie: FuzzyTieIndex,
+                               limit: 0,
+                               min_score: 0 }
+    let by_idx = fuzzyrank.rank(pat("ax"), cands, o)
+    test.assert(by_idx[0].index == 0)
+
+@test
+fn test_limit_bounds_the_answer_and_min_score_drops_a_bad_guess() [io]
+    test.case("a limit of two answers two, best first")
+    let o = fuzzyrank.picker_options(2)
+    let hits = fuzzyrank.rank(pat("man"), corpus(), o)
+    test.assert(list.len(hits) == 2)
+
+    test.case("count_matches is the honest denominator the limit threw away")
+    test.assert(fuzzyrank.count_matches(pat("man"), corpus()) == 3)
+
+    test.case("min_score drops a match that is weak rather than absent")
+    let strict = FuzzyRankOptions { bonus: fuzzyscore.fzf_bonus(),
+                                    scorer: FuzzyScorerV2,
+                                    tie: FuzzyTieLength,
+                                    limit: 0,
+                                    min_score: 1000000 }
+    test.assert(list.len(fuzzyrank.rank(pat("man"), corpus(), strict)) == 0)
+
+    test.case("best answers the top result without sorting anything")
+    match fuzzyrank.best(pat("man"), corpus(), fuzzyrank.default_options())
+        None    => test.assert(false)
+        Some(h) => test.assert(h.index == fuzzyrank.rank(pat("man"), corpus(),
+                                                         fuzzyrank.default_options())[0].index)
+
+    test.case("and None when nothing matches")
+    test.assert(fuzzyrank.best(pat("zzzz"), corpus(),
+                               fuzzyrank.default_options()) == None)
+
+@test
+fn test_the_two_patterns_that_need_no_sort_say_so() [io]
+    test.case("an empty query leaves the producer's order alone")
+    test.assert(fuzzyrank.order_is_input(fuzzypat.literal("", FuzzyCaseSmart)))
+
+    test.case("so does a pure filter — there is no score to order by")
+    match fuzzypat.parse("!md", FuzzyCaseSmart)
+        Err(_) => test.assert(false)
+        Ok(f)  =>
+            test.assert(fuzzyrank.order_is_input(f))
+            let hits = fuzzyrank.rank(f, corpus(), fuzzyrank.default_options())
+            test.assert(list.len(hits) == 3)
+            test.assert(hits[0].index == 0)
+
+    test.case("a scoring query does not")
+    test.assert(not fuzzyrank.order_is_input(pat("man")))
+
+@test
+fn test_a_caller_can_bring_its_own_scores_and_its_own_list() [io]
+    let o = fuzzyrank.default_options()
+
+    test.case("rank_into appends to the caller's result list")
+    let seed: [FuzzyRanked] = []
+    let grown = fuzzyrank.rank_into(seed, pat("man"), corpus(), o)
+    test.assert(list.len(grown) == 3)
+
+    test.case("order applies the rule to results a producer scored itself")
+    let reordered = fuzzyrank.order(grown, corpus(), o)
+    test.assert(list.len(reordered) == 3)
+    test.assert(reordered[0].index == grown[0].index)

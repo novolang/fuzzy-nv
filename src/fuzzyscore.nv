@@ -1,0 +1,231 @@
+// fuzzyscore.nv — the bonus table, the two scorers, and why a score
+// and its positions are two calls.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// **SCORING AND HIGHLIGHTING ARE TWO CALLS, AND THAT IS THE DESIGN.**
+// A picker over a repository scores every path on every keystroke and
+// shows forty rows. `match_at` answers a score and the byte range the
+// match covered; `positions_of` answers where each matched cluster is,
+// and allocates a list to do it. Folding the second into the first
+// makes a hundred thousand allocations to paint forty lines, and that
+// is the difference between a picker that feels instant and one that
+// does not. fzf makes the same split — it scores with `FuzzyMatchV2`
+// in "no backtrace" mode and recomputes the positions for the visible
+// window — and it is the single most important thing to copy from it.
+//
+// THE BONUS TABLE IS A VALUE. Almost all of a fzf score is the bonus
+// for WHERE a match lands rather than that it landed: after a
+// separator, at a camel-case boundary, at the start of the basename,
+// consecutive with the last match. Different corpora want different
+// tables — a file picker weights the path separator, a symbol picker
+// weights camel case, a command-line completion weights the first
+// character — so `FuzzyBonus` is a struct a caller can replace, and
+// `fzf_bonus()` is the reference implementation's own numbers, by
+// name, so a port can be checked against it.
+//
+// EVERY POSITION IS ON A GRAPHEME-CLUSTER BOUNDARY. The matcher
+// advances with `ugrapheme.next_boundary`, so an offset it answers is
+// a boundary by construction. A UI that inverts the matched bytes
+// therefore never paints half of a combining sequence or the middle of
+// an emoji ZWJ run — which is what a byte-at-a-time matcher does, and
+// which is invisible in every ASCII test.
+//
+// TWO SCORERS AND THEY DISAGREE, ON PURPOSE. `FuzzyScorerV2` is fzf's
+// heuristic: one forward pass, linear in the candidate, and it can
+// answer a lower score than the best alignment would. `FuzzyScorerExact`
+// is the full Smith–Waterman-style dynamic program, quadratic, and
+// always finds the best alignment. A picker uses the first; a test
+// asserting "this is the best possible match" uses the second, and so
+// does a caller ranking a short list where the cost does not matter.
+// Naming both is the honest form: a package that shipped only the
+// heuristic could not be checked against the algorithm it approximates.
+
+use ugrapheme
+use fuzzypat
+
+// Which alignment search to run.
+pub enum FuzzyScorer
+    // fzf v2's heuristic: one forward pass over the candidate, linear
+    // in its length, and not always the best alignment.
+    FuzzyScorerV2
+    // The full dynamic program. Quadratic, always optimal.
+    FuzzyScorerExact
+
+// The score table. Every field is added to the running score when its
+// condition holds at a matched cluster.
+pub struct FuzzyBonus
+    // Every matched cluster scores this much before any bonus.
+    match_score: Int
+    // A match immediately after the previous one.
+    consecutive: Int
+    // A match after a separator — space, `-`, `_`, `.`, `,`, `:`, `;`.
+    boundary: Int
+    // A match at an upper-case cluster whose predecessor is
+    // lower-case. Decided with `uclass`, not with an ASCII range.
+    camel: Int
+    // A match after a path separator. Separate from `boundary`
+    // because a file picker wants it much larger: the thing a person
+    // means by typing `mod` is almost always a path component.
+    path: Int
+    // A match at offset 0 of the candidate.
+    first: Int
+    // Charged once when a run of unmatched clusters begins.
+    gap_start: Int
+    // Charged for each further unmatched cluster in that run. Both
+    // are NEGATIVE numbers in the reference table, and they are two
+    // fields because one long gap should cost less than several short
+    // ones — that is what makes a match inside one word beat a match
+    // scattered across three.
+    gap_extend: Int
+
+// A match, without its positions.
+//
+// The value a ranking pass produces, one per candidate. It is three
+// integers: a caller ranking a hundred thousand candidates holds a
+// hundred thousand of these and allocates nothing else.
+pub struct FuzzyMatch
+    // Higher is better. Comparable only between matches of the SAME
+    // pattern against the same bonus table, which is why nothing here
+    // normalises it to 0..1 — a normalised score would look
+    // comparable across patterns and would not be.
+    score: Int
+    // The byte offset of the first matched cluster, and one past the
+    // last. A caller that wants to show a fragment of a long path uses
+    // this to pick the window, without asking for positions at all.
+    start: Int
+    end: Int
+
+// fzf's own table, by name, so a port can be checked against the
+// reference implementation rather than tuned until it feels right.
+//
+// ```novo
+// use fuzzyscore
+//
+// let b = fuzzyscore.fzf_bonus()
+// println(str.from_int(b.consecutive))
+// ```
+pub fn fzf_bonus() -> FuzzyBonus []
+    todo("fuzzy-nv.fuzzyscore.fzf_bonus")
+
+// The same table with the path bonus raised and camel case lowered —
+// the weighting a file picker wants, where a person typing `mod` means
+// a directory called `models` and not `commodity`.
+pub fn path_bonus() -> FuzzyBonus []
+    todo("fuzzy-nv.fuzzyscore.path_bonus")
+
+// The same table with camel case raised — what a symbol picker wants,
+// where `ftn` should find `fromTypeName`.
+pub fn symbol_bonus() -> FuzzyBonus []
+    todo("fuzzy-nv.fuzzyscore.symbol_bonus")
+
+// Score one candidate against one compiled pattern.
+//
+// `None` when the candidate does not satisfy the pattern at all —
+// including when a negated atom matched — so a caller filters and
+// scores in one pass.
+//
+// ```novo
+// use fuzzypat
+// use fuzzyscore
+//
+// let p = fuzzypat.literal("fzy", FuzzyCaseSmart)
+// match fuzzyscore.match_at(p, "src/fuzzy.nv", fuzzyscore.fzf_bonus(), FuzzyScorerV2)
+//     Some(m) => println(str.from_int(m.score))
+//     None    => println("no match")
+// ```
+pub fn match_at(p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus,
+                scorer: FuzzyScorer) -> ?FuzzyMatch []
+    todo("fuzzy-nv.fuzzyscore.match_at")
+
+// Whether a candidate satisfies the pattern, with no score computed.
+//
+// The call an `N of M` footer makes over the whole corpus, and the one
+// a pure-filter pattern (`!test !vendor`) makes for everything: there
+// is no alignment to search for, so the answer is a scan.
+pub fn matches(p: fuzzypat.FuzzyPattern, candidate: Str) -> Bool []
+    todo("fuzzy-nv.fuzzyscore.matches")
+
+// The byte offsets of every matched cluster, for highlighting.
+//
+// THIS ALLOCATES, and it is a separate call for that reason: it is
+// made for the rows a person can see and not for the corpus. Every
+// offset is a grapheme-cluster boundary, so inverting the bytes from
+// one offset to the next boundary paints exactly one character.
+//
+// An empty list when the candidate does not match, and for a pattern
+// whose atoms are all negated — a filter highlights nothing.
+//
+// ```novo
+// use fuzzypat
+// use fuzzyscore
+//
+// let p = fuzzypat.literal("fz", FuzzyCaseSmart)
+// for at in fuzzyscore.positions_of(p, "fuzzy.nv", fuzzyscore.fzf_bonus(), FuzzyScorerV2)
+//     println(str.from_int(at))
+// ```
+pub fn positions_of(p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus,
+                    scorer: FuzzyScorer) -> [Int] []
+    todo("fuzzy-nv.fuzzyscore.positions_of")
+
+// The same offsets, appended to a caller's buffer, for a picker that
+// repaints its window on every keystroke and would rather keep one
+// list alive than allocate forty.
+pub fn positions_into(out: [Int], p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus,
+                      scorer: FuzzyScorer) -> [Int] []
+    todo("fuzzy-nv.fuzzyscore.positions_into")
+
+// Byte offsets turned into cluster INDICES, counted from the start of
+// the candidate.
+//
+// What a renderer that lays out by cell rather than by byte needs.
+// Separate because computing it means walking the candidate from the
+// start, which a caller that highlights by byte offset should not pay
+// for.
+pub fn to_cluster_indices(candidate: Str, positions: [Int]) -> [Int] []
+    todo("fuzzy-nv.fuzzyscore.to_cluster_indices")
+
+// Score one atom against a candidate, for a caller assembling its own
+// pattern semantics — a picker that wants fzf's fuzzy atom and none of
+// its syntax, or one adding an atom kind of its own.
+pub fn match_atom(a: fuzzypat.FuzzyAtom, candidate: Str, case: fuzzypat.FuzzyCase,
+                  bonus: FuzzyBonus, scorer: FuzzyScorer) -> ?FuzzyMatch []
+    todo("fuzzy-nv.fuzzyscore.match_atom")
+
+// The bonus a match at `at` would earn in `candidate`, given the
+// cluster before it.
+//
+// Published because it is the whole model, and a caller tuning a table
+// needs to see what a candidate scores position by position rather
+// than only what it scores in total.
+pub fn bonus_at(candidate: Str, at: Int, bonus: FuzzyBonus, windows: Bool) -> Int []
+    todo("fuzzy-nv.fuzzyscore.bonus_at")
+
+// The highest score this pattern could give any candidate, under this
+// table.
+//
+// Not a normalisation — see `FuzzyMatch.score` — but the number a UI
+// needs to draw a bar, and the one a caller needs to set a cutoff that
+// means the same thing for a two-letter query and a ten-letter one.
+pub fn max_score(p: fuzzypat.FuzzyPattern, bonus: FuzzyBonus) -> Int []
+    todo("fuzzy-nv.fuzzyscore.max_score")
+
+// The next grapheme-cluster boundary at or after `at`, as
+// `ugrapheme.next_boundary` defines it.
+//
+// Published because every offset this module answers is one, and a
+// caller slicing a candidate around a match needs the same function
+// rather than a guess at what this package did.
+pub fn cluster_boundary(candidate: Str, at: Int) -> Int []
+    todo("fuzzy-nv.fuzzyscore.cluster_boundary")
+
+// The matched clusters themselves, as unicode-nv's own segments.
+//
+// The type crosses the package boundary on purpose. A position this
+// module answers IS a cluster boundary, and the honest way for a
+// signature to say so is to hand back the segments the standard
+// defines rather than a pair of integers this package named itself. A
+// renderer inverting the match walks these; one that wants only the
+// offsets uses `positions_of` and pays for no second walk.
+pub fn matched_clusters(candidate: Str, positions: [Int]) -> [ugrapheme.UniCluster] []
+    todo("fuzzy-nv.fuzzyscore.matched_clusters")

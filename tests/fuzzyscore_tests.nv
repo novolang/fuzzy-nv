@@ -1,0 +1,173 @@
+// fuzzyscore_tests.nv — the bonus table, the two scorers, and the
+// split between a score and its positions.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: fuzzy-nv.<module>.<fn>`.
+//
+// THE VECTORS ARE fzf's `algo_test.go`: the bonus constants, the
+// candidates it scores, and the positions it reports for each. Where a
+// case exists only here it is a case the reference implementation has
+// no ASCII way to express — the cluster-boundary ones.
+//
+// THE TWO ASSERTIONS THIS SUITE EXISTS FOR: a score is answered
+// without allocating a position list, and every position is a grapheme
+// cluster boundary.
+
+use std.test
+use std.list
+use fuzzypat
+use fuzzyscore
+
+fn p(needle: Str) -> fuzzypat.FuzzyPattern
+    fuzzypat.literal(needle, FuzzyCaseSmart)
+
+@test
+fn test_a_match_is_a_score_and_a_range_and_nothing_else() [io]
+    test.case("a subsequence matches and answers where it sat")
+    match fuzzyscore.match_at(p("fzy"), "src/fuzzy.nv", fuzzyscore.fzf_bonus(),
+                              FuzzyScorerV2)
+        None    => test.assert(false)
+        Some(m) =>
+            test.assert(m.score > 0)
+            test.assert(m.start == 4)
+            test.assert(m.end <= 12)
+
+    test.case("a needle that is not a subsequence answers None rather than a zero score")
+    match fuzzyscore.match_at(p("zzz"), "src/fuzzy.nv", fuzzyscore.fzf_bonus(),
+                              FuzzyScorerV2)
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+
+    test.case("`matches` answers the same question with no alignment searched for")
+    test.assert(fuzzyscore.matches(p("fzy"), "src/fuzzy.nv"))
+    test.assert(not fuzzyscore.matches(p("zzz"), "src/fuzzy.nv"))
+
+@test
+fn test_the_bonuses_are_why_one_candidate_beats_another() [io]
+    let b = fuzzyscore.fzf_bonus()
+
+    test.case("a match at a word boundary beats the same match inside a word")
+    let boundary = fuzzyscore.match_at(p("bar"), "foo_bar", b, FuzzyScorerV2)
+    let inside = fuzzyscore.match_at(p("bar"), "foobarx", b, FuzzyScorerV2)
+    match boundary
+        None    => test.assert(false)
+        Some(x) =>
+            match inside
+                None    => test.assert(false)
+                Some(y) => test.assert(x.score > y.score)
+
+    test.case("a consecutive run beats a scattered one")
+    let run = fuzzyscore.match_at(p("abc"), "abcxxxx", b, FuzzyScorerV2)
+    let scattered = fuzzyscore.match_at(p("abc"), "axbxcxx", b, FuzzyScorerV2)
+    match run
+        None    => test.assert(false)
+        Some(x) =>
+            match scattered
+                None    => test.assert(false)
+                Some(y) => test.assert(x.score > y.score)
+
+    test.case("camel case is a boundary — and it is decided past ASCII")
+    let camel = fuzzyscore.match_at(p("ftn"), "fromTypeName", b, FuzzyScorerV2)
+    match camel
+        None    => test.assert(false)
+        Some(x) => test.assert(x.score > 0)
+
+    test.case("the path table weights a path separator above a camel boundary")
+    let pathb = fuzzyscore.path_bonus()
+    let sym = fuzzyscore.symbol_bonus()
+    test.assert(pathb.path > pathb.camel)
+    test.assert(sym.camel > sym.path)
+
+    test.case("both gap fields are negative, and one long gap costs less than two short ones")
+    test.assert(b.gap_start < 0)
+    test.assert(b.gap_extend < 0)
+    test.assert(b.gap_start < b.gap_extend)
+
+    test.case("bonus_at is the model, position by position")
+    test.assert(fuzzyscore.bonus_at("foo/bar", 4, b, false) > 0)
+
+@test
+fn test_the_exact_scorer_is_never_worse_than_the_heuristic() [io]
+    let b = fuzzyscore.fzf_bonus()
+    // The case fzf's forward pass is known to under-score: the first
+    // alignment it finds is not the best one.
+    let cand = "axxbxxabxx"
+
+    test.case("both scorers find the match")
+    let fast = fuzzyscore.match_at(p("ab"), cand, b, FuzzyScorerV2)
+    let exact = fuzzyscore.match_at(p("ab"), cand, b, FuzzyScorerExact)
+    test.assert(fast != None)
+    test.assert(exact != None)
+
+    test.case("and the exact one never scores lower — that is what makes it the oracle")
+    match fast
+        None    => test.assert(false)
+        Some(f) =>
+            match exact
+                None    => test.assert(false)
+                Some(e) => test.assert(e.score >= f.score)
+
+@test
+fn test_positions_are_a_second_call_and_every_one_is_a_cluster_boundary() [io]
+    let b = fuzzyscore.fzf_bonus()
+
+    test.case("the positions of an ASCII match are the matched byte offsets")
+    let ps = fuzzyscore.positions_of(p("fz"), "fuzzy.nv", b, FuzzyScorerV2)
+    test.assert(list.len(ps) == 2)
+    test.assert(ps[0] == 0)
+    test.assert(ps[1] == 2)
+
+    test.case("a non-match highlights nothing")
+    test.assert(list.len(fuzzyscore.positions_of(p("zzz"), "fuzzy.nv", b,
+                                                 FuzzyScorerV2)) == 0)
+
+    test.case("a pure filter highlights nothing either")
+    match fuzzypat.parse("!test", FuzzyCaseSmart)
+        Err(_) => test.assert(false)
+        Ok(f)  =>
+            test.assert(list.len(fuzzyscore.positions_of(f, "src/main.nv", b,
+                                                         FuzzyScorerV2)) == 0)
+
+    test.case("A POSITION NEVER LANDS INSIDE A CLUSTER — \"e\" plus a combining accent is one")
+    // "cafe" + U+0301 + ".txt": the accent makes the fourth character
+    // a two-codepoint cluster, and a byte-at-a-time matcher would
+    // answer an offset in the middle of it.
+    let text = "cafe\u{0301}.txt"
+    let cps = fuzzyscore.positions_of(p("ct"), text, b, FuzzyScorerV2)
+    for at in cps
+        test.assert(fuzzyscore.cluster_boundary(text, at) == at)
+
+    test.case("and the matched clusters come back as unicode-nv's own segments")
+    let cs = fuzzyscore.matched_clusters(text, cps)
+    test.assert(list.len(cs) == list.len(cps))
+
+    test.case("cluster indices are a third call, for a renderer that lays out by cell")
+    let idx = fuzzyscore.to_cluster_indices(text, cps)
+    test.assert(list.len(idx) == list.len(cps))
+
+    test.case("positions_into appends to the caller's own list")
+    let seed: [Int] = [99]
+    let grown = fuzzyscore.positions_into(seed, p("fz"), "fuzzy.nv", b, FuzzyScorerV2)
+    test.assert(grown[0] == 99)
+    test.assert(list.len(grown) == 3)
+
+@test
+fn test_an_atom_can_be_scored_on_its_own() [io]
+    let b = fuzzyscore.fzf_bonus()
+
+    test.case("an exact atom matches a literal substring and nothing else")
+    let exact = FuzzyAtom { kind: FuzzyAtomExact, needle: "fuzzy", negated: false }
+    test.assert(fuzzyscore.match_atom(exact, "src/fuzzy.nv", FuzzyCaseIgnore, b,
+                                      FuzzyScorerV2) != None)
+    test.assert(fuzzyscore.match_atom(exact, "src/fzy.nv", FuzzyCaseIgnore, b,
+                                      FuzzyScorerV2) == None)
+
+    test.case("a prefix atom anchors at the start")
+    let pre = FuzzyAtom { kind: FuzzyAtomPrefix, needle: "src", negated: false }
+    test.assert(fuzzyscore.match_atom(pre, "src/fuzzy.nv", FuzzyCaseIgnore, b,
+                                      FuzzyScorerV2) != None)
+    test.assert(fuzzyscore.match_atom(pre, "lib/src/fuzzy.nv", FuzzyCaseIgnore, b,
+                                      FuzzyScorerV2) == None)
+
+    test.case("max_score is the ceiling a UI draws a bar against")
+    test.assert(fuzzyscore.max_score(p("fzy"), b) > 0)

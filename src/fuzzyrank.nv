@@ -1,0 +1,145 @@
+// fuzzyrank.nv — a candidate list, ordered, with the ties broken the
+// same way every time.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE ORDER IS TOTAL, AND THAT IS A REQUIREMENT RATHER THAN A NICETY.
+// A picker repaints on every keystroke, and two candidates with the
+// same score that swap places between two repaints make the list
+// flicker under the cursor — a person presses Enter on the row they
+// were looking at and opens a different file. So the comparison is
+// defined down to the last step: score, then the caller's chosen
+// tiebreak, then the candidate's INDEX in the input, which is unique.
+// There is no arbitrary case left.
+//
+// NOTHING IS COPIED. A ranking answers indices into the caller's own
+// candidate list, never the strings. The candidates may be a list a
+// producer is still appending to, a slice of a memory-mapped index, or
+// forty thousand paths a directory walk found; a ranker that returned
+// `[Str]` would double that.
+//
+// `limit` BOUNDS THE ANSWER, NOT THE WORK, AND THE README SAYS SO. A
+// caller asking for the top forty of a hundred thousand still scores a
+// hundred thousand candidates — there is no way to know which forty
+// win without scoring them — but it holds forty results rather than a
+// sorted hundred thousand. novim's own picker sorts the whole list and
+// then truncates; this keeps a bounded heap instead, which is the same
+// answer and a different amount of memory.
+
+use fuzzypat
+use fuzzyscore
+
+// What separates two candidates with the same score.
+//
+// fzf's `--tiebreak`, in fzf's own order of usefulness.
+pub enum FuzzyTie
+    // The shorter candidate wins. fzf's default, and the right one for
+    // paths: `src/io.nv` before `src/internal/io_helpers.nv`.
+    FuzzyTieLength
+    // The one whose match starts earlier wins.
+    FuzzyTieBegin
+    // The one whose match ends earlier wins.
+    FuzzyTieEnd
+    // Nothing — fall straight through to the input index, so equal
+    // scores come out in producer order. What a caller whose producer
+    // already sorted by recency wants.
+    FuzzyTieIndex
+
+// One result.
+pub struct FuzzyRanked
+    // Index into the candidate list the caller passed in.
+    index: Int
+    // The match that earned the place, so a caller can highlight from
+    // `start`/`end` without scoring again.
+    matched: fuzzyscore.FuzzyMatch
+
+// How a ranking runs.
+pub struct FuzzyRankOptions
+    bonus: fuzzyscore.FuzzyBonus
+    scorer: fuzzyscore.FuzzyScorer
+    tie: FuzzyTie
+    // At most this many results. Zero means all of them.
+    limit: Int
+    // Candidates scoring below this are dropped even though they
+    // matched. Zero keeps every match, which is fzf's behaviour; a
+    // command-line completion that would rather show nothing than show
+    // a bad guess sets it.
+    min_score: Int
+
+// fzf's defaults: its own bonus table, the fast scorer, length as the
+// tiebreak, no limit and no cutoff.
+//
+// ```novo
+// use fuzzyrank
+//
+// let o = fuzzyrank.default_options()
+// println(str.from_int(o.limit))   // 0 — all of them
+// ```
+pub fn default_options() -> FuzzyRankOptions []
+    todo("fuzzy-nv.fuzzyrank.default_options")
+
+// A file picker's: the path bonus table, and the top `limit` results.
+pub fn picker_options(limit: Int) -> FuzzyRankOptions []
+    todo("fuzzy-nv.fuzzyrank.picker_options")
+
+// Rank a candidate list.
+//
+// ```novo
+// use fuzzypat
+// use fuzzyrank
+//
+// let p = fuzzypat.literal("mn", FuzzyCaseSmart)
+// let hits = fuzzyrank.rank(p, ["src/main.nv", "docs/manual.md"],
+//                           fuzzyrank.default_options())
+// for h in hits
+//     println(str.from_int(h.index))
+// ```
+pub fn rank(p: fuzzypat.FuzzyPattern, candidates: [Str], o: FuzzyRankOptions) -> [FuzzyRanked] []
+    todo("fuzzy-nv.fuzzyrank.rank")
+
+// Rank, appending to the caller's own result list — the shape a picker
+// that repaints on every keystroke wants, so the list outlives the
+// keystroke rather than the allocator seeing it again.
+pub fn rank_into(out: [FuzzyRanked], p: fuzzypat.FuzzyPattern, candidates: [Str],
+                 o: FuzzyRankOptions) -> [FuzzyRanked] []
+    todo("fuzzy-nv.fuzzyrank.rank_into")
+
+// How many candidates match at all, ignoring `limit` and `min_score`.
+//
+// The denominator of an honest `40 of 1204` footer. A named call
+// because a caller cannot get it from a limited ranking — that is
+// exactly the number the limit threw away — and because it can be
+// answered with `fuzzyscore.matches`, which searches for no alignment
+// and costs a scan.
+pub fn count_matches(p: fuzzypat.FuzzyPattern, candidates: [Str]) -> Int []
+    todo("fuzzy-nv.fuzzyrank.count_matches")
+
+// Rank a list the caller has already scored — for a producer that
+// scores as results arrive and wants the ordering rule without
+// rescoring.
+pub fn order(hits: [FuzzyRanked], candidates: [Str], o: FuzzyRankOptions) -> [FuzzyRanked] []
+    todo("fuzzy-nv.fuzzyrank.order")
+
+// Compare two results under the ordering rule: negative when `a` comes
+// first, positive when `b` does, and NEVER zero for two different
+// indices.
+//
+// Published because a caller merging two ranked lists — results from
+// two producers, an index and a live walk — has to merge them under
+// the same rule, and because the guarantee that it is never zero is
+// the one worth being able to test.
+pub fn compare(a: FuzzyRanked, b: FuzzyRanked, candidates: [Str], tie: FuzzyTie) -> Int []
+    todo("fuzzy-nv.fuzzyrank.compare")
+
+// The best single result, or `None` when nothing matched.
+//
+// The call a command-line completion with one answer makes, and it
+// does not sort: the maximum under `compare` is one pass.
+pub fn best(p: fuzzypat.FuzzyPattern, candidates: [Str], o: FuzzyRankOptions) -> ?FuzzyRanked []
+    todo("fuzzy-nv.fuzzyrank.best")
+
+// Whether the ranking would be the producer's own order, so a caller
+// can skip it entirely: true for an empty pattern and for one whose
+// atoms are all negated.
+pub fn order_is_input(p: fuzzypat.FuzzyPattern) -> Bool []
+    todo("fuzzy-nv.fuzzyrank.order_is_input")

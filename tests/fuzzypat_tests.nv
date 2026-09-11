@@ -1,0 +1,202 @@
+// fuzzypat_tests.nv — the query language, and what it refuses.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: fuzzy-nv.<module>.<fn>`.
+// That is the expected result until the bodies land.
+//
+// THE VECTORS ARE fzf's OWN. `man fzf`'s SEARCH SYNTAX table is the
+// specification for every case below, and the smart-case rule is
+// fzf's `--smart-case` default. Where nucleo's parser differs — it
+// treats a lone `|` as a literal rather than refusing it — the test
+// says which one this package follows and why.
+//
+// THE ASSERTION THIS SUITE EXISTS FOR: the needle's work happens once.
+// Everything in `FuzzyPattern` is a decision that would otherwise be
+// remade per candidate, and `effective_case` is the one a person can
+// see.
+
+use std.test
+use std.list
+use fuzzypat
+
+@test
+fn test_a_plain_needle_is_one_fuzzy_atom_and_cannot_fail() [io]
+    let p = fuzzypat.literal("fzy", FuzzyCaseSmart)
+
+    test.case("one term, one atom")
+    test.assert(list.len(p.terms) == 1)
+    test.assert(list.len(p.terms[0].atoms) == 1)
+
+    test.case("and it is a fuzzy atom, not an exact one")
+    match p.terms[0].atoms[0].kind
+        FuzzyAtomFuzzy => test.assert(true)
+        _              => test.assert(false)
+
+    test.case("the query is kept as typed, so a UI can echo it")
+    test.assert(p.source == "fzy")
+
+    test.case("a literal pattern carries fzf's sigils as TEXT — that is what literal means")
+    let l = fuzzypat.literal("^src", FuzzyCaseSmart)
+    test.assert(l.terms[0].atoms[0].needle == "^src")
+
+@test
+fn test_the_extended_syntax_is_fzfs_table() [io]
+    match fuzzypat.parse("sbtrkt 'wild ^music .mp3$ !fire", FuzzyCaseSmart)
+        Err(_) => test.assert(false)
+        Ok(p)  =>
+            test.case("five terms, every one of which must match")
+            test.assert(list.len(p.terms) == 5)
+
+            test.case("a bare word is fuzzy")
+            match p.terms[0].atoms[0].kind
+                FuzzyAtomFuzzy => test.assert(true)
+                _              => test.assert(false)
+
+            test.case("a leading quote is exact, and the quote is not part of the needle")
+            match p.terms[1].atoms[0].kind
+                FuzzyAtomExact => test.assert(p.terms[1].atoms[0].needle == "wild")
+                _              => test.assert(false)
+
+            test.case("^ is a prefix")
+            match p.terms[2].atoms[0].kind
+                FuzzyAtomPrefix => test.assert(p.terms[2].atoms[0].needle == "music")
+                _               => test.assert(false)
+
+            test.case("$ is a suffix")
+            match p.terms[3].atoms[0].kind
+                FuzzyAtomSuffix => test.assert(p.terms[3].atoms[0].needle == ".mp3")
+                _               => test.assert(false)
+
+            test.case("! negates, and negation is a flag rather than a kind")
+            test.assert(p.terms[4].atoms[0].negated)
+            match p.terms[4].atoms[0].kind
+                FuzzyAtomFuzzy => test.assert(true)
+                _              => test.assert(false)
+
+    test.case("^exact\$ is the whole candidate — one atom, not two")
+    match fuzzypat.parse("^main.nv$", FuzzyCaseSmart)
+        Err(_) => test.assert(false)
+        Ok(p)  =>
+            test.assert(list.len(p.terms[0].atoms) == 1)
+            match p.terms[0].atoms[0].kind
+                FuzzyAtomEqual => test.assert(true)
+                _              => test.assert(false)
+
+@test
+fn test_alternation_is_inside_a_term_and_conjunction_is_between_them() [io]
+    // The query a person actually types: either extension, but not a
+    // thumbnail. A flat list of atoms cannot express it.
+    match fuzzypat.parse("png | jpg !thumb", FuzzyCaseSmart)
+        Err(_) => test.assert(false)
+        Ok(p)  =>
+            test.case("two terms")
+            test.assert(list.len(p.terms) == 2)
+
+            test.case("the first holds both alternatives")
+            test.assert(list.len(p.terms[0].atoms) == 2)
+
+            test.case("the second is the negation, alone")
+            test.assert(list.len(p.terms[1].atoms) == 1)
+            test.assert(p.terms[1].atoms[0].negated)
+
+            test.case("and atom_count counts every atom, negated ones included")
+            test.assert(fuzzypat.atom_count(p) == 3)
+
+@test
+fn test_every_refusal_names_a_byte_offset_in_the_query() [io]
+    test.case("a bang with nothing after it")
+    match fuzzypat.parse("src !", FuzzyCaseSmart)
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            match e
+                FuzzyPatternDanglingSigil(at) => test.assert(at == 4)
+                _                             => test.assert(false)
+
+    test.case("an unterminated quote")
+    match fuzzypat.parse("'wild", FuzzyCaseSmart)
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            match e
+                FuzzyPatternUnclosedQuote(_) => test.assert(true)
+                _                            => test.assert(false)
+
+    test.case("a bar with nothing on one side — nucleo takes it as a literal, this refuses it")
+    match fuzzypat.parse("png |", FuzzyCaseSmart)
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            match e
+                FuzzyPatternDanglingAlternation(_) => test.assert(true)
+                _                                  => test.assert(false)
+
+    test.case("and error_at reads the offset off any of them without a match")
+    test.assert(fuzzypat.error_at(FuzzyPatternUnclosedQuote(9)) == 9)
+
+@test
+fn test_smart_case_is_decided_once_and_is_readable_afterwards() [io]
+    test.case("an all-lower needle resolves to ignore")
+    let lower = fuzzypat.literal("readme", FuzzyCaseSmart)
+    match lower.effective_case
+        FuzzyCaseIgnore => test.assert(true)
+        _               => test.assert(false)
+
+    test.case("one upper-case character resolves to respect — the rule people are surprised by")
+    let upper = fuzzypat.literal("Readme", FuzzyCaseSmart)
+    match upper.effective_case
+        FuzzyCaseRespect => test.assert(true)
+        _                => test.assert(false)
+
+    test.case("FuzzyCaseSmart never survives into effective_case")
+    match upper.effective_case
+        FuzzyCaseSmart => test.assert(false)
+        _              => test.assert(true)
+
+    test.case("the requested policy is kept too, so a UI can say which rule applied")
+    match upper.requested_case
+        FuzzyCaseSmart => test.assert(true)
+        _              => test.assert(false)
+
+    test.case("smart_case_of is the rule alone, for a caller compiling its own atoms")
+    match fuzzypat.smart_case_of("Foo")
+        FuzzyCaseRespect => test.assert(true)
+        _                => test.assert(false)
+
+@test
+fn test_the_two_degenerate_patterns_are_named_rather_than_derived() [io]
+    test.case("an empty query demands nothing")
+    let empty = fuzzypat.literal("", FuzzyCaseSmart)
+    test.assert(fuzzypat.is_empty(empty))
+
+    test.case("and so does a query of spaces — which str.len would not have caught")
+    match fuzzypat.parse("   ", FuzzyCaseSmart)
+        Err(_) => test.assert(false)
+        Ok(p)  => test.assert(fuzzypat.is_empty(p))
+
+    test.case("a query of nothing but negations is a filter with no score to give")
+    match fuzzypat.parse("!test !vendor", FuzzyCaseSmart)
+        Err(_) => test.assert(false)
+        Ok(p)  =>
+            test.assert(fuzzypat.is_filter_only(p))
+            test.assert(not fuzzypat.is_empty(p))
+
+    test.case("and one with a positive atom is not")
+    match fuzzypat.parse("src !test", FuzzyCaseSmart)
+        Err(_) => test.assert(false)
+        Ok(p)  => test.assert(not fuzzypat.is_filter_only(p))
+
+@test
+fn test_the_comparison_primitives_are_published_because_the_table_indexes_them() [io]
+    test.case("under ignore, two cases of one letter are equal")
+    test.assert(fuzzypat.chars_equal(65, 97, FuzzyCaseIgnore))
+
+    test.case("under respect they are not")
+    test.assert(not fuzzypat.chars_equal(65, 97, FuzzyCaseRespect))
+
+    test.case("a letter and a separator are different classes")
+    test.assert(fuzzypat.char_class(97) != fuzzypat.char_class(47))
+
+    test.case("a forward slash is a path separator everywhere")
+    test.assert(fuzzypat.is_path_separator(47, false))
+
+    test.case("a backslash is one only when the caller says the candidates are Windows paths")
+    test.assert(not fuzzypat.is_path_separator(92, false))
+    test.assert(fuzzypat.is_path_separator(92, true))

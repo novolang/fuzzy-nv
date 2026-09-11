@@ -1,0 +1,214 @@
+// fuzzypat.nv — the needle, compiled once.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// **THE LOAD-BEARING INTERFACE OF THIS PACKAGE IS `FuzzyPattern`.**
+// The API a completion menu actually needs is "one needle, a hundred
+// thousand candidates, recomputed on every keystroke", and the obvious
+// signature —
+//
+//     fn score(needle: Str, haystack: Str) -> Int
+//
+// — redoes the needle's work once per candidate. What that work is,
+// concretely: splitting the needle into fzf's terms, deciding the case
+// policy under smart-case, and cutting each term into the clusters the
+// matcher advances over. A `FuzzyPattern` is that done once, and the
+// per-candidate call is then a walk over the haystack and nothing
+// else.
+//
+// The second thing the type buys is a PLACE TO PUT fzf's extended
+// search syntax. `'wild` is exact, `^music` is a prefix, `.mp3$` is a
+// suffix, `!fire` is a negation, and `a | b` is an alternation inside
+// one term; terms are separated by spaces and every one of them must
+// match. None of that can live in a two-string function signature, so
+// a library shaped that way pushes it into every consumer — and every
+// consumer implements a different subset of it.
+//
+// A `FuzzyPattern` IS A VALUE AND HOLDS NO STATE. Matching does not
+// mutate it, so one pattern can be matched against a list in any order,
+// and a caller that wants to keep the last pattern beside the last
+// query keeps two values.
+//
+// SMART CASE IS RESOLVED AT COMPILE TIME, NOT PER CANDIDATE. fzf's
+// rule is "case-insensitive unless the needle contains an upper-case
+// character", which is a property of the needle; deciding it once is
+// both faster and the only way `FuzzyPattern.effective_case` can be a
+// field a caller can read to explain the behaviour to a person.
+
+// How upper and lower case are compared.
+pub enum FuzzyCase
+    // fzf's default: ignore case unless the needle contains an
+    // upper-case character, in which case respect it. Resolved when
+    // the pattern is compiled, and the answer is readable afterwards.
+    FuzzyCaseSmart
+    // Never distinguish. ASCII folding plus `uclass`'s simple case
+    // rules; full Unicode folding is `ucase.fold` and is the caller's
+    // to apply, because it needs the 245 KB case table this package
+    // will not make a completion menu carry.
+    FuzzyCaseIgnore
+    // Always distinguish.
+    FuzzyCaseRespect
+
+// What one atom of a term demands of a candidate.
+pub enum FuzzyAtomKind
+    // A subsequence, scored. The default, and what a bare word is.
+    FuzzyAtomFuzzy
+    // A literal substring. fzf's `'wild`.
+    FuzzyAtomExact
+    // A literal at the start. fzf's `^music`.
+    FuzzyAtomPrefix
+    // A literal at the end. fzf's `.mp3$`.
+    FuzzyAtomSuffix
+    // The whole candidate, literally. fzf's `^exact$`.
+    FuzzyAtomEqual
+
+// One demand.
+pub struct FuzzyAtom
+    kind: FuzzyAtomKind
+    // The text this atom matches, with its sigils removed.
+    needle: Str
+    // `!` in front: the candidate must NOT satisfy this atom. A
+    // negated atom contributes no score and no positions — it is a
+    // filter — which is why it is a flag here rather than a kind of
+    // its own.
+    negated: Bool
+
+// One space-separated term: the atoms it was written with, ANY of
+// which satisfies it.
+//
+// fzf spells alternation `a | b` inside a term and conjunction with a
+// space between terms. Two levels and not one, because a flat list
+// cannot express `(png | jpg) !thumb`, which is the query a person
+// actually types.
+pub struct FuzzyTerm
+    atoms: [FuzzyAtom]
+
+// A needle, compiled.
+pub struct FuzzyPattern
+    // The query as it was typed, kept so a UI can echo it.
+    source: Str
+    // Every term; all of them must be satisfied.
+    terms: [FuzzyTerm]
+    // The policy as WRITTEN.
+    requested_case: FuzzyCase
+    // The policy as RESOLVED — `FuzzyCaseSmart` never appears here.
+    // Readable so an interface can tell a person why `Foo` stopped
+    // matching `foobar`.
+    effective_case: FuzzyCase
+
+// Why a query could not be compiled. Every variant carries the byte
+// offset in the query, because a query is something a person is
+// typing and the report goes under the cursor.
+pub enum FuzzyPatternError
+    // `!` or `^` or `$` with nothing to apply to.
+    FuzzyPatternDanglingSigil(at: Int)
+    // An unterminated `'` quote.
+    FuzzyPatternUnclosedQuote(at: Int)
+    // A `|` at the start or end of a term, or two in a row.
+    FuzzyPatternDanglingAlternation(at: Int)
+
+// The one-line message, for a caller printing rather than matching.
+//
+// `Result<T, FuzzyPatternError>` requires it — SPEC § 3.4 makes
+// `Error` the bound on a result's error type — so the impl exists
+// whether or not an interface release has anything to say yet, and its
+// body is a `todo()` like every other body here.
+//
+// ```novo
+// use fuzzypat
+//
+// match fuzzypat.parse("!", FuzzyCaseSmart)
+//     Ok(_)  => println("compiled")
+//     Err(e) => println(e.message())
+// ```
+impl Error for FuzzyPatternError
+    // Panics with `not implemented` until the bodies land.
+    fn message(self) -> Str
+        todo("fuzzy-nv.FuzzyPatternError.message")
+
+// Compile a plain needle: one fuzzy atom, no syntax, nothing to
+// refuse.
+//
+// The call a completion menu that does not want fzf's query language
+// makes — and it cannot fail, which is why it is separate from
+// `parse`.
+//
+// ```novo
+// use fuzzypat
+//
+// let p = fuzzypat.literal("fzy", FuzzyCaseSmart)
+// println(str.from_int(list.len(p.terms)))   // 1
+// ```
+pub fn literal(needle: Str, case: FuzzyCase) -> FuzzyPattern []
+    todo("fuzzy-nv.fuzzypat.literal")
+
+// Compile a query in fzf's extended search syntax.
+//
+// ```novo
+// use fuzzypat
+//
+// match fuzzypat.parse("^src .nv$ !test", FuzzyCaseSmart)
+//     Ok(p)  => println(str.from_int(list.len(p.terms)))   // 3
+//     Err(_) => println("bad query")
+// ```
+pub fn parse(query: Str, case: FuzzyCase) -> Result<FuzzyPattern, FuzzyPatternError> []
+    todo("fuzzy-nv.fuzzypat.parse")
+
+// The byte offset in the query a compile error is about, for a caller
+// reporting it without matching on every variant.
+pub fn error_at(e: FuzzyPatternError) -> Int []
+    todo("fuzzy-nv.fuzzypat.error_at")
+
+// Whether the pattern demands nothing — an empty query.
+//
+// A named call because the right behaviour for an empty query is
+// "everything matches, in producer order", and a caller that tested
+// `str.len(query) == 0` would get it wrong for a query of spaces.
+pub fn is_empty(p: FuzzyPattern) -> Bool []
+    todo("fuzzy-nv.fuzzypat.is_empty")
+
+// Whether every atom in the pattern is negated. Such a pattern is a
+// pure filter: it has no score to give, so a ranking over it is the
+// producer's order and a caller can skip the sort entirely.
+pub fn is_filter_only(p: FuzzyPattern) -> Bool []
+    todo("fuzzy-nv.fuzzypat.is_filter_only")
+
+// How many atoms, negated ones included — the number a UI shows beside
+// a query, and the loop bound a caller writing its own matcher needs.
+pub fn atom_count(p: FuzzyPattern) -> Int []
+    todo("fuzzy-nv.fuzzypat.atom_count")
+
+// The case policy fzf's smart-case rule resolves `needle` to.
+//
+// Published because a caller that compiles its own atoms still wants
+// the rule, and because it is the rule people are surprised by.
+pub fn smart_case_of(needle: Str) -> FuzzyCase []
+    todo("fuzzy-nv.fuzzypat.smart_case_of")
+
+// Two codepoints compared under a case policy.
+//
+// The one place case is decided, so a caller extending this package
+// compares the same way it does. `uclass`'s simple case mapping is
+// what makes it right past ASCII.
+pub fn chars_equal(a: Int, b: Int, case: FuzzyCase) -> Bool []
+    todo("fuzzy-nv.fuzzypat.chars_equal")
+
+// What class of character `ch` is, for the bonus table: the answer
+// `uclass` gives, reduced to the three distinctions fzf's table makes
+// — alphanumeric, a separator, or neither.
+//
+// Answered as an `Int` rather than an enum of this package's own
+// because it indexes a table, and because the table is
+// `FuzzyBonus`'s, which a caller may replace.
+pub fn char_class(ch: Int) -> Int []
+    todo("fuzzy-nv.fuzzypat.char_class")
+
+// Whether `ch` is a path separator for the purposes of the path
+// bonus: `/` always, and `\` as well when the caller says the
+// candidates are Windows paths.
+//
+// A parameter rather than a build-time constant, because a program
+// that ranks remote paths on one platform and local paths on another
+// needs both in the same process.
+pub fn is_path_separator(ch: Int, windows: Bool) -> Bool []
+    todo("fuzzy-nv.fuzzypat.is_path_separator")

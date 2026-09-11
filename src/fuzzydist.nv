@@ -1,0 +1,192 @@
+// fuzzydist.nv — the classic string distances, and the cutoff that
+// makes them usable.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A DIFFERENT QUESTION FROM THE REST OF THIS PACKAGE, which is why it
+// is a module of its own. `fuzzyscore` answers "does this needle occur
+// in this candidate, and how well" — a subsequence question, over a
+// needle much shorter than its haystack. This module answers "how far
+// apart are these two strings" — a symmetric question over two strings
+// of similar length. A did-you-mean over command names, a spell
+// checker's candidate filter and a deduplicator all want this one; a
+// completion menu wants the other. Mixing them is how a picker ends up
+// ranking by edit distance and feeling wrong.
+//
+// **EVERY DISTANCE HAS A BOUNDED FORM, AND IT IS THE ONE TO USE.**
+// `levenshtein_within(a, b, max)` answers `None` as soon as the
+// distance is known to exceed `max`, which lets the dynamic program
+// fill a diagonal band of width `2 * max + 1` instead of the whole
+// matrix. For the question a did-you-mean actually asks — "which of
+// these 300 command names is within 2 edits of what was typed" — that
+// is the difference between linear and quadratic work per candidate.
+// rapidfuzz's `score_cutoff` is the same idea and is most of why
+// rapidfuzz is fast; publishing only the unbounded form would be
+// publishing the slow half.
+//
+// THE TWO DAMERAU DISTANCES ARE BOTH NAMED. "Damerau-Levenshtein"
+// means two different metrics: the optimal string alignment distance,
+// which forbids editing a substring twice, and the unrestricted one,
+// which does not. `osa("ca", "abc")` is 3 and `damerau("ca", "abc")`
+// is 2. Libraries routinely ship one under the other's name; this
+// package ships both under their own, and says which is which.
+//
+// UNITS ARE GRAPHEME CLUSTERS, NOT BYTES. An edit distance counted in
+// bytes says a two-byte `é` is two edits from nothing, which is wrong
+// for every purpose anybody counts edits for. The costs here are per
+// cluster, via `ugrapheme`.
+
+// The similarity two strings have, as a value in `[0.0, 1.0]`.
+//
+// A type of its own would be over-engineering; the doc comment is
+// where the range is promised, and every function answering one says
+// so.
+
+// Levenshtein distance: insertions, deletions and substitutions, one
+// each, counted in grapheme clusters.
+//
+// ```novo
+// use fuzzydist
+//
+// println(str.from_int(fuzzydist.levenshtein("kitten", "sitting")))   // 3
+// ```
+pub fn levenshtein(a: Str, b: Str) -> Int []
+    todo("fuzzy-nv.fuzzydist.levenshtein")
+
+// Levenshtein, abandoned as soon as the answer is known to exceed
+// `max`.
+//
+// THE CALL TO MAKE. See the module comment: the bound turns a
+// quadratic fill into a band of width `2 * max + 1`, which is what a
+// did-you-mean over three hundred command names needs.
+//
+// ```novo
+// use fuzzydist
+//
+// match fuzzydist.levenshtein_within("comit", "commit", 2)
+//     Some(d) => println(str.from_int(d))   // 1
+//     None    => println("further than 2")
+// ```
+pub fn levenshtein_within(a: Str, b: Str, max: Int) -> ?Int []
+    todo("fuzzy-nv.fuzzydist.levenshtein_within")
+
+// Levenshtein with per-operation costs — the form a spell checker
+// wants, where a substitution is usually cheaper than an insertion
+// plus a deletion, and the form a diff-like alignment wants, where it
+// is not.
+pub fn levenshtein_weighted(a: Str, b: Str, insert: Int, delete: Int, substitute: Int) -> Int []
+    todo("fuzzy-nv.fuzzydist.levenshtein_weighted")
+
+// Optimal string alignment distance: Levenshtein plus transposition of
+// two ADJACENT clusters, with no substring edited twice.
+//
+// `osa("ca", "abc")` is 3. This is what most libraries ship as
+// "Damerau-Levenshtein"; it is not the same metric, and it is not a
+// metric at all — it violates the triangle inequality.
+pub fn osa(a: Str, b: Str) -> Int []
+    todo("fuzzy-nv.fuzzydist.osa")
+
+// Unrestricted Damerau-Levenshtein: transpositions with no
+// restriction on re-editing.
+//
+// `damerau("ca", "abc")` is 2. A true metric, and the more expensive
+// of the two.
+pub fn damerau(a: Str, b: Str) -> Int []
+    todo("fuzzy-nv.fuzzydist.damerau")
+
+// The same, abandoned past `max`.
+pub fn osa_within(a: Str, b: Str, max: Int) -> ?Int []
+    todo("fuzzy-nv.fuzzydist.osa_within")
+
+// Hamming distance: differing clusters, position by position.
+//
+// `None` when the two strings have different cluster counts, rather
+// than a number that would compare wrongly with one from an equal-length
+// pair. Hamming is only defined for equal lengths, and returning the
+// length difference instead — which several libraries do — makes it
+// silently not Hamming.
+pub fn hamming(a: Str, b: Str) -> ?Int []
+    todo("fuzzy-nv.fuzzydist.hamming")
+
+// The length of the longest common subsequence, in clusters.
+pub fn lcs_length(a: Str, b: Str) -> Int []
+    todo("fuzzy-nv.fuzzydist.lcs_length")
+
+// Indel distance: insertions and deletions only, no substitutions.
+// The metric underneath `ratio`.
+pub fn indel(a: Str, b: Str) -> Int []
+    todo("fuzzy-nv.fuzzydist.indel")
+
+// Jaro similarity, in `[0.0, 1.0]`. 1.0 is identical.
+pub fn jaro(a: Str, b: Str) -> Float []
+    todo("fuzzy-nv.fuzzydist.jaro")
+
+// Jaro-Winkler similarity, in `[0.0, 1.0]`: Jaro with a bonus for a
+// shared prefix, with Winkler's own constants — scaling factor 0.1 and
+// a prefix considered up to 4 clusters.
+//
+// ```novo
+// use fuzzydist
+//
+// let s = fuzzydist.jaro_winkler("MARTHA", "MARHTA")
+// println(if s > 0.96 then "close" else "far")
+// ```
+pub fn jaro_winkler(a: Str, b: Str) -> Float []
+    todo("fuzzy-nv.fuzzydist.jaro_winkler")
+
+// Jaro-Winkler with the two constants supplied — for a caller matching
+// a corpus where the prefix means more or less than it does in the
+// surnames Winkler tuned it on.
+pub fn jaro_winkler_with(a: Str, b: Str, scale: Float, max_prefix: Int) -> Float []
+    todo("fuzzy-nv.fuzzydist.jaro_winkler_with")
+
+// Indel similarity normalised to `[0.0, 1.0]`. rapidfuzz's `ratio`,
+// and `difflib.SequenceMatcher.ratio`'s answer for the same inputs.
+pub fn ratio(a: Str, b: Str) -> Float []
+    todo("fuzzy-nv.fuzzydist.ratio")
+
+// The best `ratio` between `needle` and any substring of `haystack` of
+// the needle's length. rapidfuzz's `partial_ratio`.
+//
+// The call for "is this short string in that long one, roughly" —
+// where `ratio` answers a low number simply because the lengths
+// differ.
+pub fn partial_ratio(needle: Str, haystack: Str) -> Float []
+    todo("fuzzy-nv.fuzzydist.partial_ratio")
+
+// `ratio` over both strings' whitespace-separated tokens, each
+// lower-cased and sorted. rapidfuzz's `token_sort_ratio`: what makes
+// `"Klaus Hagen"` and `"Hagen, Klaus"` compare as the same name.
+pub fn token_sort_ratio(a: Str, b: Str) -> Float []
+    todo("fuzzy-nv.fuzzydist.token_sort_ratio")
+
+// `ratio` over the set of tokens rather than the sequence.
+// rapidfuzz's `token_set_ratio`: what makes a name with a middle
+// initial compare as the same name as one without.
+pub fn token_set_ratio(a: Str, b: Str) -> Float []
+    todo("fuzzy-nv.fuzzydist.token_set_ratio")
+
+// The indices of every candidate within `max` edits of `needle`, best
+// first.
+//
+// The whole did-you-mean, in one call, over the bounded distance. A
+// caller writing this loop itself is the caller who forgets the
+// bound.
+//
+// ```novo
+// use fuzzydist
+//
+// for i in fuzzydist.nearest("comit", ["commit", "checkout", "clone"], 2, 3)
+//     println(str.from_int(i))   // 0
+// ```
+pub fn nearest(needle: Str, candidates: [Str], max: Int, limit: Int) -> [Int] []
+    todo("fuzzy-nv.fuzzydist.nearest")
+
+// How many grapheme clusters a string holds — the unit every distance
+// here is counted in.
+//
+// Published so a caller choosing a `max` chooses it in the same unit,
+// and so the difference from `str.len`, which counts bytes, is
+// visible rather than implied.
+pub fn cluster_count(s: Str) -> Int []
+    todo("fuzzy-nv.fuzzydist.cluster_count")

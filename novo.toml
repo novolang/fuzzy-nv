@@ -1,0 +1,51 @@
+[package]
+name        = "fuzzy-nv"
+version     = "0.0.1"
+description = "fzf's and nucleo's subsequence matching: a needle compiled ONCE into a pattern with fzf's extended search syntax, matched against a hundred thousand candidates without recompiling it; the bonus table (word boundary, camel case, path separator, consecutive run) as a value a caller can replace; a score without positions for ranking and positions on demand for highlighting, always on grapheme-cluster boundaries; a stable ranking with fzf's tiebreaks; and the classic string distances in a module of their own.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`.  A match is arithmetic over two strings the caller already
+# holds; nothing is read, nothing is written, and the answer is a
+# score and a range rather than a copy of anything.
+layer       = "core"
+
+category    = "text"
+
+tags        = ["fuzzy", "fzf", "nucleo", "matching", "completion", "levenshtein", "jaro-winkler", "rapidfuzz", "sans-io"]
+repository  = "https://github.com/novolang/fuzzy-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "A needle compiled once, a score without positions, and positions that never split a cluster"
+
+[dependencies]
+# unicode-nv, for TWO things, and both of them are correctness rather
+# than completeness.
+#
+# THE BONUS TABLE CLASSIFIES CHARACTERS.  fzf's score is almost
+# entirely the bonus for where a match lands: after a separator, at a
+# camel-case boundary, at the start of a word.  Deciding "the previous
+# character was lower-case and this one is upper-case" in ASCII gets
+# German, Greek and Cyrillic camel case wrong, and a symbol picker over
+# a codebase with non-English identifiers is exactly where that shows.
+# `uclass.is_uppercase`, `is_lowercase` and `is_alphanumeric` take a
+# codepoint and no data table, so the cost is a branch.
+#
+# A POSITION IS ALWAYS ON A CLUSTER BOUNDARY.  Highlighting is what
+# positions are for, and a position in the middle of a combining
+# sequence or an emoji ZWJ run paints half a character.  The matcher
+# advances by `ugrapheme.next_boundary`, so every offset it answers is
+# a boundary by construction rather than by a check the caller has to
+# remember.
+unicode-nv = "^0.0.1"
