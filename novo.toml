@@ -1,6 +1,6 @@
 [package]
 name        = "fuzzy-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "fzf's and nucleo's subsequence matching: a needle compiled ONCE into a pattern with fzf's extended search syntax, matched against a hundred thousand candidates without recompiling it; the bonus table (word boundary, camel case, path separator, consecutive run) as a value a caller can replace; a score without positions for ranking and positions on demand for highlighting, always on grapheme-cluster boundaries; a stable ranking with fzf's tiebreaks; and the classic string distances in a module of their own.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
