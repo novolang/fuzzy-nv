@@ -5,6 +5,74 @@ All notable changes to fuzzy-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.0 — 2026-09-27
+
+The first implementation of the interface published as 0.0.1: fzf's
+query syntax and score, a fast scorer and an exact one, positions on
+cluster boundaries, a total ranking, and the classic distances.
+
+### Changed, breaking
+
+- `FuzzyPatternUnclosedQuote` is gone.  fzf's `'wild` is a complete
+  exact atom with no closing quote, so the variant could never be
+  produced.  A quote with nothing after it is
+  `FuzzyPatternDanglingSigil`, like `!`, `^` and `$`.
+- `fuzzyscore.positions_into` and `fuzzyrank.rank_into` take their
+  first argument as `var out`.  Under 0.13.0's list rule a function
+  writes into a caller's list only through a `var` parameter, and the
+  caller passes a `var` list.
+- `!fire` is a literal negation, as in fzf's table, where the
+  interface's tests read it as a fuzzy one.  `!'fire` is the fuzzy
+  negation.
+
+### Behaviour the interface left open
+
+- The score is fzf's `calculateScore` with fzf's constants.  The start
+  of the text and whitespace earn `first`, a word after `/` earns
+  `path`, a word after any other non-word character earns `boundary`,
+  and an upper-case letter after a lower-case one, or a digit after a
+  non-digit, earns `camel`.  fzf gives its delimiters `, : ; |` the
+  path value, and this table gives them `boundary`.
+- `FuzzyScorerV2` is fzf's forward and backward scan.
+  `FuzzyScorerExact` is a dynamic program over the needle's clusters,
+  the candidate's clusters and the length of the current run, and
+  answers the best alignment under the same model.
+- A term's score is its best-scoring positive atom.  A term satisfied
+  only by a negated atom adds nothing.  A pattern that matched without
+  scoring answers a score, a start and an end of 0.
+- A literal atom keeps its best-scoring occurrence, so `'main` in
+  `domain/main.nv` highlights the path component.
+- A pattern that is empty or all negated ranks in the input's order
+  whatever the tiebreak, which is fzf's rule for a query it cannot
+  sort.  `best` answers the first result `rank` would.
+- `FuzzyTieLength` compares byte lengths.
+- Ignoring case compares the simple lowercase mappings of ASCII,
+  Latin-1, Latin Extended-A, Latin Extended Additional, the basic Greek
+  letters and the Cyrillic block with its supplement, with no data
+  table.  `FuzzyCaseSmart` passed straight to `chars_equal` ignores
+  case.
+- `fuzzypat` gains `CLASS_WORD`, `CLASS_SEPARATOR` and `CLASS_OTHER`,
+  the three answers of `char_class`.
+- `max_score` is a ceiling, every cluster matched with the table's
+  largest bonus, rather than a score some candidate reaches.
+- `jaro_winkler_with` applies the prefix bonus only above a Jaro
+  similarity of 0.7, Winkler's threshold.  `jaro` counts half the
+  mismatched matches, rounded down, as transpositions.
+- `token_set_ratio` answers 0.0 for a string with no tokens, as
+  rapidfuzz does.
+- `nearest` takes a `limit` of 0 as no limit.
+
+### Tests
+
+- 43 tests in five suites.  Hand-worked scores from fzf's constants; a
+  brute force over every alignment of three hundred generated pairs as
+  the oracle for the exact scorer; Python's `str.lower` over every
+  codepoint of the claimed case ranges; and two hundred generated
+  pairs whose distances `tools/gen_dist_vectors.py` computes with the
+  textbook algorithms and `difflib`.
+- Every line under `src/` is executed by the suites;
+  `bash tests/coverage.sh` prints the number.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.

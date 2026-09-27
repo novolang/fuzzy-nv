@@ -1,19 +1,16 @@
 [package]
 name        = "fuzzy-nv"
-version     = "0.0.2"
-description = "fzf's and nucleo's subsequence matching: a needle compiled ONCE into a pattern with fzf's extended search syntax, matched against a hundred thousand candidates without recompiling it; the bonus table (word boundary, camel case, path separator, consecutive run) as a value a caller can replace; a score without positions for ranking and positions on demand for highlighting, always on grapheme-cluster boundaries; a stable ranking with fzf's tiebreaks; and the classic string distances in a module of their own.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "fzf's subsequence matching: a needle compiled once into a pattern with fzf's extended search syntax and smart case; fzf's bonus table as a value a caller can replace; a fast scorer and an exact one; a score without positions for ranking and positions on demand for highlighting, always on grapheme-cluster boundaries; a total ranking with fzf's tiebreaks; and the classic string distances, each with a bounded form."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+# `experimental` because no program outside this repository has used the
+# package yet.
+stability   = "experimental"
 
 # `core`.  A match is arithmetic over two strings the caller already
-# holds; nothing is read, nothing is written, and the answer is a
-# score and a range rather than a copy of anything.
+# holds.  Nothing is read or written, and the answer is a score and a
+# range rather than a copy of anything.
 layer       = "core"
 
 category    = "text"

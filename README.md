@@ -4,17 +4,10 @@ Fuzzy matching is what a completion menu does when it accepts `mn` for
 `src/main.nv`: the letters of the needle appear in the candidate in
 order, but not next to each other. The reference implementation is
 [fzf](https://github.com/junegunn/fzf), whose scoring and query syntax
-this package follows, and
-[nucleo](https://github.com/helix-editor/nucleo) is the second reading.
+this package follows.
 The package also carries the classic string distances, which answer a
 different question, in a module of their own. It is built on
 [unicode-nv](https://novo-lang.org/packages/unicode-nv).
-
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
 
 ## What it is
 
@@ -37,7 +30,7 @@ not.
 A **pattern** is a needle compiled. fzf's query language puts several
 demands in one query, and the pattern holds them: `'wild` must occur
 literally, `^music` at the start, `.mp3$` at the end, `!fire` must not
-occur, and `png | jpg` is satisfied by either. Terms separated by
+occur literally, and `png | jpg` is satisfied by either. Terms separated by
 spaces must all be satisfied.
 
 **Smart case** means ignore case unless the needle contains an
@@ -85,11 +78,6 @@ fn main() [io]
         println(str.from_int(at))
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: fuzzy-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
-
 ## What the package contains
 
 | Module | Contents |
@@ -111,7 +99,7 @@ every candidate, drops the ones below the cutoff, orders the rest and
 returns at most `limit` of them. `rank_into` appends to a list you
 already hold, for a picker that repaints on every keystroke.
 
-**`fuzzyscore.match_at` scores one candidate and allocates nothing.**
+**`fuzzyscore.match_at` scores one candidate and keeps no positions.**
 It answers a score and the byte range the match covered.
 
 **`fuzzyscore.positions_of` allocates, and is for the visible rows
@@ -137,8 +125,8 @@ forms are there for a caller that genuinely wants the number.
    `FuzzyPattern` holds the terms, the atoms and the resolved case
    rule. A picker over a hundred thousand paths compiles one pattern
    per keystroke.
-2. **A score and its positions are two calls.** `match_at` allocates
-   nothing. `positions_of` allocates a list. fzf makes the same split,
+2. **A score and its positions are two calls.** `match_at` builds no
+   position list. `positions_of` allocates one. fzf makes the same split,
    scoring in its no-backtrace mode and recomputing positions for the
    visible window only. Folding them together means a hundred thousand
    allocations to paint forty rows.
@@ -167,14 +155,20 @@ forms are there for a caller that genuinely wants the number.
    is what makes a match inside one word beat a match scattered across
    three.
 8. **The two scorers disagree, and that is what they are for.**
-   `FuzzyScorerV2` is fzf's heuristic: one forward pass, linear in the
-   candidate, and it can answer less than the best alignment would.
-   `FuzzyScorerExact` is the full dynamic program: quadratic, always
-   optimal. A picker uses the first. A test asserting that something is
-   the best possible match uses the second.
+   `FuzzyScorerV2` is fzf's fast algorithm: a forward scan and a
+   backward scan, linear in the candidate, and it can answer less than
+   the best alignment would. For `fzy` in `src/fuzzy.nv` it matches the
+   first `z` and scores 60, where the best alignment takes the second
+   and scores 66. `FuzzyScorerExact` searches every alignment and always
+   answers the best. Its table grows with the needle's length squared
+   times the candidate's. A picker uses the first. A test asserting that
+   something is the best possible match uses the second.
 9. **A negated atom contributes no score and no positions.** `!fire` is
-   a filter. A pattern whose atoms are all negated highlights nothing,
-   and `fuzzypat.is_filter_only` reports that case.
+   a filter, and it is literal: a candidate is dropped when it contains
+   `fire`. `!'fire` drops a candidate that contains it as a
+   subsequence. A pattern whose atoms are all negated highlights
+   nothing, scores every candidate 0, and ranks them in the order they
+   were given. `fuzzypat.is_filter_only` reports that case.
 10. **Alternation is inside a term and conjunction is between terms.**
     fzf writes them `a | b` and `a b`. Two levels rather than one,
     because `(png | jpg) !thumb` is a query people type and a flat list
@@ -182,11 +176,14 @@ forms are there for a caller that genuinely wants the number.
 11. **`smart_case` never appears in `effective_case`.** The resolved
     value is readable, so an interface can tell a person why `Foo`
     stopped matching `foobar`.
-12. **The case rule here is ASCII folding plus the simple Unicode case
-    mappings.** Full case folding needs the 245 KB case table, and a
-    completion menu should not carry it to compare two ASCII paths. A
-    caller who wants it folds both the needle and the candidates with
-    unicode-nv's `ucase.fold` first.
+12. **Ignoring case compares simple lowercase mappings, and only for
+    the Latin, Greek and Cyrillic letters.** The mappings held are those
+    of ASCII, Latin-1, Latin Extended-A, Latin Extended Additional, the
+    basic Greek letters and the Cyrillic block with its supplement. Every
+    other codepoint compares as itself. Full case folding needs the
+    245 KB case table, and a completion menu should not carry it to
+    compare two paths. A caller who wants it folds both the needle and
+    the candidates with unicode-nv's `ucase.fold` first.
 13. **`osa` and `damerau` are different functions.** `osa` is the
     optimal string alignment distance, which forbids editing a
     substring twice. `damerau` is the unrestricted one.
@@ -197,6 +194,12 @@ forms are there for a caller that genuinely wants the number.
 15. **A ranking answers indices, not strings.** `FuzzyRanked.index`
     points into the candidate list the caller passed in, and nothing is
     copied.
+16. **A score is fzf's `calculateScore`.** Every matched cluster earns
+    16 and a bonus for where it lands, and the first cluster's bonus
+    counts twice. A cluster continuing a run earns at least the bonus
+    the run started with. A gap between two matches costs 3 for its
+    first cluster and 1 for each further one. The module comment of
+    `fuzzyscore` lists which bonus applies where.
 
 ## What is not included
 
@@ -243,59 +246,39 @@ forms are there for a caller that genuinely wants the number.
 The reference for the scoring is fzf's `src/algo/algo.go`: the bonus
 constants, the `FuzzyMatchV2` forward pass, the no-backtrace mode that
 justifies the score and positions split, and the smart-case rule. The
-`SEARCH SYNTAX` table in `man fzf` is the specification for
-`fuzzypat.parse`, and fzf's `--tiebreak` is `FuzzyTie`. Where fzf and
-nucleo differ the suite says which one this package follows: nucleo
-reads a dangling `|` as a literal and this package refuses it, because
-a silent reinterpretation of something a person is typing is worse than
-a message under the cursor.
+`SEARCH SYNTAX` table in `man fzf` and fzf's `parseTerms` are the
+specification for `fuzzypat.parse`, and fzf's `--tiebreak` is
+`FuzzyTie`. [nucleo](https://github.com/helix-editor/nucleo) reads a
+dangling `|` as a literal, and this package refuses it with the offset
+of the `|`.
+
+The scores in `fuzzyscore_tests.nv` are worked by hand from fzf's
+constants, each with the sum it expects. The exact scorer is checked
+against a brute force that enumerates every alignment of three hundred
+generated needles and candidates. The fast scorer must never beat it,
+and the positions each scorer reports must score what it answered.
+
+The case mappings are checked against Python's `str.lower` over every
+codepoint of the ranges rule 12 names.
 
 The distance vectors are the published ones: `kitten` and `sitting` for
 Levenshtein, `MARTHA` and `MARHTA` for Jaro-Winkler, `ca` and `abc` for
-the two Damerau distances, and rapidfuzz's own values for the four
-ratios.
+the two Damerau distances, and rapidfuzz's definitions for the four
+ratios. `tools/gen_dist_vectors.py` computes Levenshtein, OSA,
+Damerau, the longest common subsequence, Jaro, Jaro-Winkler and `ratio`
+for two hundred generated pairs with the textbook algorithms, and
+`difflib.SequenceMatcher`'s ratio beside them.
+`fuzzydist_vectors_tests.nv` asserts that every one agrees, and that
+difflib's ratio is never above `ratio`.
 
 ```bash
-novo test tests/fuzzypat_tests.nv      # 7 tests: the query syntax and smart case
-novo test tests/fuzzyscore_tests.nv    # 5 tests: the bonus model and the two scorers
-novo test tests/fuzzyrank_tests.nv     # 6 tests: the total order and the tiebreaks
-novo test tests/fuzzydist_tests.nv     # 8 tests: the published distance vectors
+novo test tests/fuzzypat_tests.nv            # the query syntax and the case rule
+novo test tests/fuzzyscore_tests.nv          # the bonus model and the two scorers
+novo test tests/fuzzyrank_tests.nv           # the total order and the tiebreaks
+novo test tests/fuzzydist_tests.nv           # the published distance vectors
+novo test tests/fuzzydist_vectors_tests.nv   # the generated comparison
+bash tests/coverage.sh                        # line coverage over src/
 ```
-
-The suite asserts that a pattern compiles once and matches many, that
-the exact scorer is never worse than the heuristic, that every reported
-position falls on a cluster boundary, that `compare` is never zero for
-two different candidates, that a negated atom yields no positions, that
-a dangling alternation is refused with an offset, and that `osa` and
-`damerau` disagree on `ca` and `abc`.
-
-The tests compile today and fail at run, each on the
-`not implemented: fuzzy-nv.<module>.<fn>` panic that is its body. That
-is the expected state of an interface release. They turn green one at a
-time as bodies land.
-
-## Implementation status
-
-Nothing is implemented. The table lists the surface an implementation
-has to fill.
-
-| Item | Implemented |
-| --- | --- |
-| `fuzzypat.literal`, `.parse`, `.error_at`, `FuzzyPatternError.message` | no |
-| `fuzzypat.is_empty`, `.is_filter_only`, `.atom_count` | no |
-| `fuzzypat.smart_case_of`, `.chars_equal`, `.char_class`, `.is_path_separator` | no |
-| `fuzzyscore.fzf_bonus`, `.path_bonus`, `.symbol_bonus` | no |
-| `fuzzyscore.match_at`, `.matches`, `.match_atom`, `.max_score`, `.bonus_at` | no |
-| `fuzzyscore.positions_of`, `.positions_into`, `.to_cluster_indices` | no |
-| `fuzzyscore.cluster_boundary`, `.matched_clusters` | no |
-| `fuzzyrank.default_options`, `.picker_options` | no |
-| `fuzzyrank.rank`, `.rank_into`, `.order`, `.best`, `.compare` | no |
-| `fuzzyrank.count_matches`, `.order_is_input` | no |
-| `fuzzydist.levenshtein`, `.levenshtein_within`, `.levenshtein_weighted` | no |
-| `fuzzydist.osa`, `.osa_within`, `.damerau`, `.hamming`, `.lcs_length`, `.indel` | no |
-| `fuzzydist.jaro`, `.jaro_winkler`, `.jaro_winkler_with` | no |
-| `fuzzydist.ratio`, `.partial_ratio`, `.token_sort_ratio`, `.token_set_ratio` | no |
-| `fuzzydist.nearest`, `.cluster_count` | no |
 
 ## Licence
 
