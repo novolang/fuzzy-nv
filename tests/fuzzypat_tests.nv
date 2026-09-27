@@ -1,23 +1,52 @@
-// fuzzypat_tests.nv — the query language, and what it refuses.
+// fuzzypat_tests.nv — the query language, what it refuses, and the case
+// rule.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: fuzzy-nv.<module>.<fn>`.
-// That is the expected result until the bodies land.
+// The specification for the syntax is the SEARCH SYNTAX table of
+// `man fzf`, and the order the sigils are read in is fzf's `parseTerms`
+// in `src/pattern.go`.  Where nucleo's parser differs, the case says
+// which one this package follows.
 //
-// THE VECTORS ARE fzf's OWN. `man fzf`'s SEARCH SYNTAX table is the
-// specification for every case below, and the smart-case rule is
-// fzf's `--smart-case` default. Where nucleo's parser differs — it
-// treats a lone `|` as a literal rather than refusing it — the test
-// says which one this package follows and why.
-//
-// THE ASSERTION THIS SUITE EXISTS FOR: the needle's work happens once.
-// Everything in `FuzzyPattern` is a decision that would otherwise be
-// remade per candidate, and `effective_case` is the one a person can
-// see.
+// The case mappings are checked against Python's `str.lower`, over
+// every codepoint of the ranges the module claims.
 
 use std.test
 use std.list
 use fuzzypat
+
+// The first atom of term `t`.
+fn atom_of(p: fuzzypat.FuzzyPattern, t: Int) -> fuzzypat.FuzzyAtom
+    let term = p.terms[t]
+    let a = term.atoms[0]
+    a
+
+fn compiled(query: Str) -> fuzzypat.FuzzyPattern
+    match fuzzypat.parse(query, FuzzyCaseSmart)
+        Ok(p)  => p
+        Err(e) =>
+            test.assert(false)
+            fuzzypat.literal("", FuzzyCaseSmart)
+
+fn is_kind(a: fuzzypat.FuzzyAtom, want: Str) -> Bool
+    let got = match a.kind
+        FuzzyAtomFuzzy  => "fuzzy"
+        FuzzyAtomExact  => "exact"
+        FuzzyAtomPrefix => "prefix"
+        FuzzyAtomSuffix => "suffix"
+        FuzzyAtomEqual  => "equal"
+    got == want
+
+fn refusal_at(query: Str) -> Int
+    match fuzzypat.parse(query, FuzzyCaseSmart)
+        Ok(_)  => 0 - 1
+        Err(e) => fuzzypat.error_at(e)
+
+fn is_sigil_refusal(query: Str) -> Bool
+    match fuzzypat.parse(query, FuzzyCaseSmart)
+        Ok(_)  => false
+        Err(e) =>
+            match e
+                FuzzyPatternDanglingSigil(_) => true
+                _                            => false
 
 @test
 fn test_a_plain_needle_is_one_fuzzy_atom_and_cannot_fail() [io]
@@ -25,82 +54,118 @@ fn test_a_plain_needle_is_one_fuzzy_atom_and_cannot_fail() [io]
 
     test.case("one term, one atom")
     test.assert(list.len(p.terms) == 1)
-    test.assert(list.len(p.terms[0].atoms) == 1)
+    test.assert(fuzzypat.atom_count(p) == 1)
 
     test.case("and it is a fuzzy atom, not an exact one")
-    match p.terms[0].atoms[0].kind
-        FuzzyAtomFuzzy => test.assert(true)
-        _              => test.assert(false)
+    test.assert(is_kind(atom_of(p, 0), "fuzzy"))
 
-    test.case("the query is kept as typed, so a UI can echo it")
+    test.case("the query is kept as typed, so an interface can echo it")
     test.assert(p.source == "fzy")
 
-    test.case("a literal pattern carries fzf's sigils as TEXT — that is what literal means")
-    let l = fuzzypat.literal("^src", FuzzyCaseSmart)
-    test.assert(l.terms[0].atoms[0].needle == "^src")
+    test.case("a literal pattern carries fzf's sigils as text")
+    let l = fuzzypat.literal("^src !x", FuzzyCaseSmart)
+    test.assert(atom_of(l, 0).needle == "^src !x")
+    test.assert(not atom_of(l, 0).negated)
+
+    test.case("an empty needle compiles to no terms")
+    test.assert(list.len(fuzzypat.literal("", FuzzyCaseSmart).terms) == 0)
 
 @test
 fn test_the_extended_syntax_is_fzfs_table() [io]
-    match fuzzypat.parse("sbtrkt 'wild ^music .mp3$ !fire", FuzzyCaseSmart)
-        Err(_) => test.assert(false)
-        Ok(p)  =>
-            test.case("five terms, every one of which must match")
-            test.assert(list.len(p.terms) == 5)
+    let p = compiled("sbtrkt 'wild ^music .mp3$ !fire")
 
-            test.case("a bare word is fuzzy")
-            match p.terms[0].atoms[0].kind
-                FuzzyAtomFuzzy => test.assert(true)
-                _              => test.assert(false)
+    test.case("five terms, every one of which must match")
+    test.assert(list.len(p.terms) == 5)
 
-            test.case("a leading quote is exact, and the quote is not part of the needle")
-            match p.terms[1].atoms[0].kind
-                FuzzyAtomExact => test.assert(p.terms[1].atoms[0].needle == "wild")
-                _              => test.assert(false)
+    test.case("a bare word is fuzzy")
+    test.assert(is_kind(atom_of(p, 0), "fuzzy"))
+    test.assert(atom_of(p, 0).needle == "sbtrkt")
 
-            test.case("^ is a prefix")
-            match p.terms[2].atoms[0].kind
-                FuzzyAtomPrefix => test.assert(p.terms[2].atoms[0].needle == "music")
-                _               => test.assert(false)
+    test.case("a leading quote is exact, and the quote is not part of the needle")
+    test.assert(is_kind(atom_of(p, 1), "exact"))
+    test.assert(atom_of(p, 1).needle == "wild")
 
-            test.case("$ is a suffix")
-            match p.terms[3].atoms[0].kind
-                FuzzyAtomSuffix => test.assert(p.terms[3].atoms[0].needle == ".mp3")
-                _               => test.assert(false)
+    test.case("^ is a prefix")
+    test.assert(is_kind(atom_of(p, 2), "prefix"))
+    test.assert(atom_of(p, 2).needle == "music")
 
-            test.case("! negates, and negation is a flag rather than a kind")
-            test.assert(p.terms[4].atoms[0].negated)
-            match p.terms[4].atoms[0].kind
-                FuzzyAtomFuzzy => test.assert(true)
-                _              => test.assert(false)
+    test.case("$ is a suffix")
+    test.assert(is_kind(atom_of(p, 3), "suffix"))
+    test.assert(atom_of(p, 3).needle == ".mp3")
 
-    test.case("^exact\$ is the whole candidate — one atom, not two")
-    match fuzzypat.parse("^main.nv$", FuzzyCaseSmart)
-        Err(_) => test.assert(false)
-        Ok(p)  =>
-            test.assert(list.len(p.terms[0].atoms) == 1)
-            match p.terms[0].atoms[0].kind
-                FuzzyAtomEqual => test.assert(true)
-                _              => test.assert(false)
+    test.case("! negates, and a negated word is literal, as in fzf's table")
+    test.assert(atom_of(p, 4).negated)
+    test.assert(is_kind(atom_of(p, 4), "exact"))
+    test.assert(atom_of(p, 4).needle == "fire")
+
+    test.case("^exact$ is the whole candidate: one atom, not two")
+    let whole = compiled("^main.nv$")
+    test.assert(fuzzypat.atom_count(whole) == 1)
+    test.assert(is_kind(atom_of(whole, 0), "equal"))
+    test.assert(atom_of(whole, 0).needle == "main.nv")
+
+@test
+fn test_negation_combines_with_every_other_sigil() [io]
+    test.case("!' flips a negated atom back to fuzzy, fzf's inverse-fuzzy")
+    let q = compiled("!'fire")
+    test.assert(atom_of(q, 0).negated)
+    test.assert(is_kind(atom_of(q, 0), "fuzzy"))
+
+    test.case("!^ is a negated prefix")
+    let pre = compiled("!^music")
+    test.assert(atom_of(pre, 0).negated)
+    test.assert(is_kind(atom_of(pre, 0), "prefix"))
+
+    test.case("!...$ is a negated suffix")
+    let suf = compiled("!.mp3$")
+    test.assert(is_kind(atom_of(suf, 0), "suffix"))
+    test.assert(atom_of(suf, 0).needle == ".mp3")
+
+    test.case("a quote after a suffix anchor makes a plain substring, as fzf reads it")
+    test.assert(is_kind(atom_of(compiled("'wild$"), 0), "exact"))
 
 @test
 fn test_alternation_is_inside_a_term_and_conjunction_is_between_them() [io]
-    // The query a person actually types: either extension, but not a
-    // thumbnail. A flat list of atoms cannot express it.
-    match fuzzypat.parse("png | jpg !thumb", FuzzyCaseSmart)
-        Err(_) => test.assert(false)
-        Ok(p)  =>
-            test.case("two terms")
-            test.assert(list.len(p.terms) == 2)
+    // Either extension, but not a thumbnail.
+    let p = compiled("png | jpg !thumb")
 
-            test.case("the first holds both alternatives")
-            test.assert(list.len(p.terms[0].atoms) == 2)
+    test.case("two terms")
+    test.assert(list.len(p.terms) == 2)
 
-            test.case("the second is the negation, alone")
-            test.assert(list.len(p.terms[1].atoms) == 1)
-            test.assert(p.terms[1].atoms[0].negated)
+    test.case("the first holds both alternatives")
+    let first = p.terms[0]
+    test.assert(list.len(first.atoms) == 2)
+    let second_alt = first.atoms[1]
+    test.assert(second_alt.needle == "jpg")
 
-            test.case("and atom_count counts every atom, negated ones included")
-            test.assert(fuzzypat.atom_count(p) == 3)
+    test.case("the second is the negation, alone")
+    let second = p.terms[1]
+    test.assert(list.len(second.atoms) == 1)
+    test.assert(atom_of(p, 1).negated)
+
+    test.case("and atom_count counts every atom, negated ones included")
+    test.assert(fuzzypat.atom_count(p) == 3)
+
+    test.case("a chain of alternatives stays one term")
+    let three = compiled("a | b | c")
+    test.assert(list.len(three.terms) == 1)
+    test.assert(fuzzypat.atom_count(three) == 3)
+
+    test.case("a bar joined to a word is text, since only a bar standing alone is an alternation")
+    let joined = compiled("a|b")
+    test.assert(atom_of(joined, 0).needle == "a|b")
+
+@test
+fn test_a_backslash_keeps_a_space_inside_an_atom() [io]
+    let p = compiled("foo\\ bar baz")
+
+    test.case("two terms, the first holding a space")
+    test.assert(list.len(p.terms) == 2)
+    test.assert(atom_of(p, 0).needle == "foo bar")
+
+    test.case("an escaped bar is text and not an alternation")
+    let q = compiled("a \\ | b")
+    test.assert(list.len(q.terms) == 3)
 
 @test
 fn test_every_refusal_names_a_byte_offset_in_the_query() [io]
@@ -112,24 +177,36 @@ fn test_every_refusal_names_a_byte_offset_in_the_query() [io]
                 FuzzyPatternDanglingSigil(at) => test.assert(at == 4)
                 _                             => test.assert(false)
 
-    test.case("an unterminated quote")
-    match fuzzypat.parse("'wild", FuzzyCaseSmart)
-        Ok(_)  => test.assert(false)
-        Err(e) =>
-            match e
-                FuzzyPatternUnclosedQuote(_) => test.assert(true)
-                _                            => test.assert(false)
+    test.case("a quote, a caret and a dollar with nothing to apply to")
+    test.assert(is_sigil_refusal("src '"))
+    test.assert(refusal_at("src '") == 4)
+    test.assert(is_sigil_refusal("^"))
+    test.assert(is_sigil_refusal("$"))
+    test.assert(is_sigil_refusal("!$"))
+    test.assert(is_sigil_refusal("^$"))
 
-    test.case("a bar with nothing on one side — nucleo takes it as a literal, this refuses it")
+    test.case("a bar with nothing on one side, which nucleo would take as text")
     match fuzzypat.parse("png |", FuzzyCaseSmart)
         Ok(_)  => test.assert(false)
         Err(e) =>
             match e
-                FuzzyPatternDanglingAlternation(_) => test.assert(true)
-                _                                  => test.assert(false)
+                FuzzyPatternDanglingAlternation(at) => test.assert(at == 4)
+                _                                   => test.assert(false)
 
-    test.case("and error_at reads the offset off any of them without a match")
-    test.assert(fuzzypat.error_at(FuzzyPatternUnclosedQuote(9)) == 9)
+    test.case("a bar at the start, and two in a row")
+    test.assert(refusal_at("| png") == 0)
+    test.assert(refusal_at("a | | b") == 4)
+    test.assert(not is_sigil_refusal("a | | b"))
+
+    test.case("error_at reads the offset off either variant")
+    test.assert(fuzzypat.error_at(FuzzyPatternDanglingSigil(9)) == 9)
+    test.assert(fuzzypat.error_at(FuzzyPatternDanglingAlternation(3)) == 3)
+
+    test.case("and the message names the offset")
+    test.assert(FuzzyPatternDanglingSigil(4).message() ==
+                "the search sigil at byte 4 has no text to apply to")
+    test.assert(FuzzyPatternDanglingAlternation(2).message() ==
+                "the `|` at byte 2 has no atom on one side")
 
 @test
 fn test_smart_case_is_decided_once_and_is_readable_afterwards() [io]
@@ -139,64 +216,219 @@ fn test_smart_case_is_decided_once_and_is_readable_afterwards() [io]
         FuzzyCaseIgnore => test.assert(true)
         _               => test.assert(false)
 
-    test.case("one upper-case character resolves to respect — the rule people are surprised by")
+    test.case("one upper-case character resolves to respect")
     let upper = fuzzypat.literal("Readme", FuzzyCaseSmart)
     match upper.effective_case
         FuzzyCaseRespect => test.assert(true)
         _                => test.assert(false)
 
-    test.case("FuzzyCaseSmart never survives into effective_case")
-    match upper.effective_case
-        FuzzyCaseSmart => test.assert(false)
-        _              => test.assert(true)
-
-    test.case("the requested policy is kept too, so a UI can say which rule applied")
+    test.case("the requested policy is kept too, so an interface can say which rule applied")
     match upper.requested_case
         FuzzyCaseSmart => test.assert(true)
         _              => test.assert(false)
 
-    test.case("smart_case_of is the rule alone, for a caller compiling its own atoms")
-    match fuzzypat.smart_case_of("Foo")
+    test.case("a policy that is not smart is kept as written")
+    match fuzzypat.literal("Readme", FuzzyCaseIgnore).effective_case
+        FuzzyCaseIgnore => test.assert(true)
+        _               => test.assert(false)
+    match compiled("readme").effective_case
+        FuzzyCaseIgnore => test.assert(true)
+        _               => test.assert(false)
+
+    test.case("upper case is Unicode's, past ASCII")
+    match fuzzypat.smart_case_of("\u{00C4}rger")
         FuzzyCaseRespect => test.assert(true)
         _                => test.assert(false)
+    match fuzzypat.smart_case_of("\u{03A9}mega")
+        FuzzyCaseRespect => test.assert(true)
+        _                => test.assert(false)
+    match fuzzypat.smart_case_of("\u{00E4}rger \u{1F600}")
+        FuzzyCaseIgnore => test.assert(true)
+        _               => test.assert(false)
 
 @test
-fn test_the_two_degenerate_patterns_are_named_rather_than_derived() [io]
+fn test_the_two_degenerate_patterns_are_named() [io]
     test.case("an empty query demands nothing")
-    let empty = fuzzypat.literal("", FuzzyCaseSmart)
-    test.assert(fuzzypat.is_empty(empty))
+    test.assert(fuzzypat.is_empty(fuzzypat.literal("", FuzzyCaseSmart)))
 
-    test.case("and so does a query of spaces — which str.len would not have caught")
-    match fuzzypat.parse("   ", FuzzyCaseSmart)
-        Err(_) => test.assert(false)
-        Ok(p)  => test.assert(fuzzypat.is_empty(p))
+    test.case("and so does a query of spaces")
+    test.assert(fuzzypat.is_empty(compiled("   ")))
 
     test.case("a query of nothing but negations is a filter with no score to give")
-    match fuzzypat.parse("!test !vendor", FuzzyCaseSmart)
-        Err(_) => test.assert(false)
-        Ok(p)  =>
-            test.assert(fuzzypat.is_filter_only(p))
-            test.assert(not fuzzypat.is_empty(p))
+    let f = compiled("!test !vendor")
+    test.assert(fuzzypat.is_filter_only(f))
+    test.assert(not fuzzypat.is_empty(f))
 
-    test.case("and one with a positive atom is not")
-    match fuzzypat.parse("src !test", FuzzyCaseSmart)
-        Err(_) => test.assert(false)
-        Ok(p)  => test.assert(not fuzzypat.is_filter_only(p))
+    test.case("one with a positive atom is not, and neither is an empty one")
+    test.assert(not fuzzypat.is_filter_only(compiled("src !test")))
+    test.assert(not fuzzypat.is_filter_only(compiled("")))
 
 @test
-fn test_the_comparison_primitives_are_published_because_the_table_indexes_them() [io]
+fn test_the_comparison_primitives() [io]
     test.case("under ignore, two cases of one letter are equal")
-    test.assert(fuzzypat.chars_equal(65, 97, FuzzyCaseIgnore))
+    test.assert(fuzzypat.chars_equal('A', 'a', FuzzyCaseIgnore))
+    test.assert(fuzzypat.chars_equal('a', 'A', FuzzyCaseSmart))
 
-    test.case("under respect they are not")
-    test.assert(not fuzzypat.chars_equal(65, 97, FuzzyCaseRespect))
+    test.case("under respect they are not, and a codepoint always equals itself")
+    test.assert(not fuzzypat.chars_equal('A', 'a', FuzzyCaseRespect))
+    test.assert(fuzzypat.chars_equal('A', 'A', FuzzyCaseRespect))
 
-    test.case("a letter and a separator are different classes")
-    test.assert(fuzzypat.char_class(97) != fuzzypat.char_class(47))
+    test.case("a letter, a separator and a symbol are three classes")
+    test.assert(fuzzypat.char_class('a') == CLASS_WORD)
+    test.assert(fuzzypat.char_class('7') == CLASS_WORD)
+    test.assert(fuzzypat.char_class(0x3B1) == CLASS_WORD)
+    test.assert(fuzzypat.char_class('/') == CLASS_SEPARATOR)
+    test.assert(fuzzypat.char_class(' ') == CLASS_SEPARATOR)
+    test.assert(fuzzypat.char_class('_') == CLASS_SEPARATOR)
+    test.assert(fuzzypat.char_class('@') == CLASS_OTHER)
 
     test.case("a forward slash is a path separator everywhere")
-    test.assert(fuzzypat.is_path_separator(47, false))
+    test.assert(fuzzypat.is_path_separator('/', false))
 
     test.case("a backslash is one only when the caller says the candidates are Windows paths")
-    test.assert(not fuzzypat.is_path_separator(92, false))
-    test.assert(fuzzypat.is_path_separator(92, true))
+    test.assert(not fuzzypat.is_path_separator('\\', false))
+    test.assert(fuzzypat.is_path_separator('\\', true))
+
+@test
+fn test_utf8_is_decoded_a_codepoint_at_a_time() [io]
+    let s = "a\u{00E9}\u{20AC}\u{1F600}"
+
+    test.case("one, two, three and four bytes")
+    test.assert(fuzzypat.codepoint_at(s, 0) == 'a')
+    test.assert(fuzzypat.codepoint_at(s, 1) == 0xE9)
+    test.assert(fuzzypat.codepoint_len(s, 1) == 2)
+    test.assert(fuzzypat.codepoint_at(s, 3) == 0x20AC)
+    test.assert(fuzzypat.codepoint_len(s, 3) == 3)
+    test.assert(fuzzypat.codepoint_at(s, 6) == 0x1F600)
+    test.assert(fuzzypat.codepoint_len(s, 6) == 4)
+
+    test.case("a continuation byte on its own is walked as one byte")
+    test.assert(fuzzypat.codepoint_len(s, 2) == 1)
+
+    test.case("a lead byte whose sequence is cut short is one byte too")
+    let cut = str.slice(s, 3, 4)
+    test.assert(fuzzypat.codepoint_len(cut, 0) == 1)
+    test.assert(fuzzypat.codepoint_at(cut, 0) == 0xE2)
+
+    test.case("a byte that cannot start a sequence answers itself")
+    test.assert(fuzzypat.sequence_length(0xF8) == 1)
+
+// Every codepoint of the claimed ranges whose lowercase mapping is not
+// itself, from Python 3's `str.lower` over Unicode 15.0.0.  U+0130 is the
+// one entry Python maps to two codepoints; its simple mapping in
+// UnicodeData.txt is U+0069.
+fn python_pairs() -> [(Int, Int)]
+    [
+        (0x0041, 0x0061), (0x0042, 0x0062), (0x0043, 0x0063), (0x0044, 0x0064), (0x0045, 0x0065), (0x0046, 0x0066),
+        (0x0047, 0x0067), (0x0048, 0x0068), (0x0049, 0x0069), (0x004A, 0x006A), (0x004B, 0x006B), (0x004C, 0x006C),
+        (0x004D, 0x006D), (0x004E, 0x006E), (0x004F, 0x006F), (0x0050, 0x0070), (0x0051, 0x0071), (0x0052, 0x0072),
+        (0x0053, 0x0073), (0x0054, 0x0074), (0x0055, 0x0075), (0x0056, 0x0076), (0x0057, 0x0077), (0x0058, 0x0078),
+        (0x0059, 0x0079), (0x005A, 0x007A), (0x00C0, 0x00E0), (0x00C1, 0x00E1), (0x00C2, 0x00E2), (0x00C3, 0x00E3),
+        (0x00C4, 0x00E4), (0x00C5, 0x00E5), (0x00C6, 0x00E6), (0x00C7, 0x00E7), (0x00C8, 0x00E8), (0x00C9, 0x00E9),
+        (0x00CA, 0x00EA), (0x00CB, 0x00EB), (0x00CC, 0x00EC), (0x00CD, 0x00ED), (0x00CE, 0x00EE), (0x00CF, 0x00EF),
+        (0x00D0, 0x00F0), (0x00D1, 0x00F1), (0x00D2, 0x00F2), (0x00D3, 0x00F3), (0x00D4, 0x00F4), (0x00D5, 0x00F5),
+        (0x00D6, 0x00F6), (0x00D8, 0x00F8), (0x00D9, 0x00F9), (0x00DA, 0x00FA), (0x00DB, 0x00FB), (0x00DC, 0x00FC),
+        (0x00DD, 0x00FD), (0x00DE, 0x00FE), (0x0100, 0x0101), (0x0102, 0x0103), (0x0104, 0x0105), (0x0106, 0x0107),
+        (0x0108, 0x0109), (0x010A, 0x010B), (0x010C, 0x010D), (0x010E, 0x010F), (0x0110, 0x0111), (0x0112, 0x0113),
+        (0x0114, 0x0115), (0x0116, 0x0117), (0x0118, 0x0119), (0x011A, 0x011B), (0x011C, 0x011D), (0x011E, 0x011F),
+        (0x0120, 0x0121), (0x0122, 0x0123), (0x0124, 0x0125), (0x0126, 0x0127), (0x0128, 0x0129), (0x012A, 0x012B),
+        (0x012C, 0x012D), (0x012E, 0x012F), (0x0130, 0x0069), (0x0132, 0x0133), (0x0134, 0x0135), (0x0136, 0x0137),
+        (0x0139, 0x013A), (0x013B, 0x013C), (0x013D, 0x013E), (0x013F, 0x0140), (0x0141, 0x0142), (0x0143, 0x0144),
+        (0x0145, 0x0146), (0x0147, 0x0148), (0x014A, 0x014B), (0x014C, 0x014D), (0x014E, 0x014F), (0x0150, 0x0151),
+        (0x0152, 0x0153), (0x0154, 0x0155), (0x0156, 0x0157), (0x0158, 0x0159), (0x015A, 0x015B), (0x015C, 0x015D),
+        (0x015E, 0x015F), (0x0160, 0x0161), (0x0162, 0x0163), (0x0164, 0x0165), (0x0166, 0x0167), (0x0168, 0x0169),
+        (0x016A, 0x016B), (0x016C, 0x016D), (0x016E, 0x016F), (0x0170, 0x0171), (0x0172, 0x0173), (0x0174, 0x0175),
+        (0x0176, 0x0177), (0x0178, 0x00FF), (0x0179, 0x017A), (0x017B, 0x017C), (0x017D, 0x017E), (0x0386, 0x03AC),
+        (0x0388, 0x03AD), (0x0389, 0x03AE), (0x038A, 0x03AF), (0x038C, 0x03CC), (0x038E, 0x03CD), (0x038F, 0x03CE),
+        (0x0391, 0x03B1), (0x0392, 0x03B2), (0x0393, 0x03B3), (0x0394, 0x03B4), (0x0395, 0x03B5), (0x0396, 0x03B6),
+        (0x0397, 0x03B7), (0x0398, 0x03B8), (0x0399, 0x03B9), (0x039A, 0x03BA), (0x039B, 0x03BB), (0x039C, 0x03BC),
+        (0x039D, 0x03BD), (0x039E, 0x03BE), (0x039F, 0x03BF), (0x03A0, 0x03C0), (0x03A1, 0x03C1), (0x03A3, 0x03C3),
+        (0x03A4, 0x03C4), (0x03A5, 0x03C5), (0x03A6, 0x03C6), (0x03A7, 0x03C7), (0x03A8, 0x03C8), (0x03A9, 0x03C9),
+        (0x03AA, 0x03CA), (0x03AB, 0x03CB), (0x0400, 0x0450), (0x0401, 0x0451), (0x0402, 0x0452), (0x0403, 0x0453),
+        (0x0404, 0x0454), (0x0405, 0x0455), (0x0406, 0x0456), (0x0407, 0x0457), (0x0408, 0x0458), (0x0409, 0x0459),
+        (0x040A, 0x045A), (0x040B, 0x045B), (0x040C, 0x045C), (0x040D, 0x045D), (0x040E, 0x045E), (0x040F, 0x045F),
+        (0x0410, 0x0430), (0x0411, 0x0431), (0x0412, 0x0432), (0x0413, 0x0433), (0x0414, 0x0434), (0x0415, 0x0435),
+        (0x0416, 0x0436), (0x0417, 0x0437), (0x0418, 0x0438), (0x0419, 0x0439), (0x041A, 0x043A), (0x041B, 0x043B),
+        (0x041C, 0x043C), (0x041D, 0x043D), (0x041E, 0x043E), (0x041F, 0x043F), (0x0420, 0x0440), (0x0421, 0x0441),
+        (0x0422, 0x0442), (0x0423, 0x0443), (0x0424, 0x0444), (0x0425, 0x0445), (0x0426, 0x0446), (0x0427, 0x0447),
+        (0x0428, 0x0448), (0x0429, 0x0449), (0x042A, 0x044A), (0x042B, 0x044B), (0x042C, 0x044C), (0x042D, 0x044D),
+        (0x042E, 0x044E), (0x042F, 0x044F), (0x0460, 0x0461), (0x0462, 0x0463), (0x0464, 0x0465), (0x0466, 0x0467),
+        (0x0468, 0x0469), (0x046A, 0x046B), (0x046C, 0x046D), (0x046E, 0x046F), (0x0470, 0x0471), (0x0472, 0x0473),
+        (0x0474, 0x0475), (0x0476, 0x0477), (0x0478, 0x0479), (0x047A, 0x047B), (0x047C, 0x047D), (0x047E, 0x047F),
+        (0x0480, 0x0481), (0x048A, 0x048B), (0x048C, 0x048D), (0x048E, 0x048F), (0x0490, 0x0491), (0x0492, 0x0493),
+        (0x0494, 0x0495), (0x0496, 0x0497), (0x0498, 0x0499), (0x049A, 0x049B), (0x049C, 0x049D), (0x049E, 0x049F),
+        (0x04A0, 0x04A1), (0x04A2, 0x04A3), (0x04A4, 0x04A5), (0x04A6, 0x04A7), (0x04A8, 0x04A9), (0x04AA, 0x04AB),
+        (0x04AC, 0x04AD), (0x04AE, 0x04AF), (0x04B0, 0x04B1), (0x04B2, 0x04B3), (0x04B4, 0x04B5), (0x04B6, 0x04B7),
+        (0x04B8, 0x04B9), (0x04BA, 0x04BB), (0x04BC, 0x04BD), (0x04BE, 0x04BF), (0x04C0, 0x04CF), (0x04C1, 0x04C2),
+        (0x04C3, 0x04C4), (0x04C5, 0x04C6), (0x04C7, 0x04C8), (0x04C9, 0x04CA), (0x04CB, 0x04CC), (0x04CD, 0x04CE),
+        (0x04D0, 0x04D1), (0x04D2, 0x04D3), (0x04D4, 0x04D5), (0x04D6, 0x04D7), (0x04D8, 0x04D9), (0x04DA, 0x04DB),
+        (0x04DC, 0x04DD), (0x04DE, 0x04DF), (0x04E0, 0x04E1), (0x04E2, 0x04E3), (0x04E4, 0x04E5), (0x04E6, 0x04E7),
+        (0x04E8, 0x04E9), (0x04EA, 0x04EB), (0x04EC, 0x04ED), (0x04EE, 0x04EF), (0x04F0, 0x04F1), (0x04F2, 0x04F3),
+        (0x04F4, 0x04F5), (0x04F6, 0x04F7), (0x04F8, 0x04F9), (0x04FA, 0x04FB), (0x04FC, 0x04FD), (0x04FE, 0x04FF),
+        (0x0500, 0x0501), (0x0502, 0x0503), (0x0504, 0x0505), (0x0506, 0x0507), (0x0508, 0x0509), (0x050A, 0x050B),
+        (0x050C, 0x050D), (0x050E, 0x050F), (0x0510, 0x0511), (0x0512, 0x0513), (0x0514, 0x0515), (0x0516, 0x0517),
+        (0x0518, 0x0519), (0x051A, 0x051B), (0x051C, 0x051D), (0x051E, 0x051F), (0x0520, 0x0521), (0x0522, 0x0523),
+        (0x0524, 0x0525), (0x0526, 0x0527), (0x0528, 0x0529), (0x052A, 0x052B), (0x052C, 0x052D), (0x052E, 0x052F),
+        (0x1E00, 0x1E01), (0x1E02, 0x1E03), (0x1E04, 0x1E05), (0x1E06, 0x1E07), (0x1E08, 0x1E09), (0x1E0A, 0x1E0B),
+        (0x1E0C, 0x1E0D), (0x1E0E, 0x1E0F), (0x1E10, 0x1E11), (0x1E12, 0x1E13), (0x1E14, 0x1E15), (0x1E16, 0x1E17),
+        (0x1E18, 0x1E19), (0x1E1A, 0x1E1B), (0x1E1C, 0x1E1D), (0x1E1E, 0x1E1F), (0x1E20, 0x1E21), (0x1E22, 0x1E23),
+        (0x1E24, 0x1E25), (0x1E26, 0x1E27), (0x1E28, 0x1E29), (0x1E2A, 0x1E2B), (0x1E2C, 0x1E2D), (0x1E2E, 0x1E2F),
+        (0x1E30, 0x1E31), (0x1E32, 0x1E33), (0x1E34, 0x1E35), (0x1E36, 0x1E37), (0x1E38, 0x1E39), (0x1E3A, 0x1E3B),
+        (0x1E3C, 0x1E3D), (0x1E3E, 0x1E3F), (0x1E40, 0x1E41), (0x1E42, 0x1E43), (0x1E44, 0x1E45), (0x1E46, 0x1E47),
+        (0x1E48, 0x1E49), (0x1E4A, 0x1E4B), (0x1E4C, 0x1E4D), (0x1E4E, 0x1E4F), (0x1E50, 0x1E51), (0x1E52, 0x1E53),
+        (0x1E54, 0x1E55), (0x1E56, 0x1E57), (0x1E58, 0x1E59), (0x1E5A, 0x1E5B), (0x1E5C, 0x1E5D), (0x1E5E, 0x1E5F),
+        (0x1E60, 0x1E61), (0x1E62, 0x1E63), (0x1E64, 0x1E65), (0x1E66, 0x1E67), (0x1E68, 0x1E69), (0x1E6A, 0x1E6B),
+        (0x1E6C, 0x1E6D), (0x1E6E, 0x1E6F), (0x1E70, 0x1E71), (0x1E72, 0x1E73), (0x1E74, 0x1E75), (0x1E76, 0x1E77),
+        (0x1E78, 0x1E79), (0x1E7A, 0x1E7B), (0x1E7C, 0x1E7D), (0x1E7E, 0x1E7F), (0x1E80, 0x1E81), (0x1E82, 0x1E83),
+        (0x1E84, 0x1E85), (0x1E86, 0x1E87), (0x1E88, 0x1E89), (0x1E8A, 0x1E8B), (0x1E8C, 0x1E8D), (0x1E8E, 0x1E8F),
+        (0x1E90, 0x1E91), (0x1E92, 0x1E93), (0x1E94, 0x1E95), (0x1E9E, 0x00DF), (0x1EA0, 0x1EA1), (0x1EA2, 0x1EA3),
+        (0x1EA4, 0x1EA5), (0x1EA6, 0x1EA7), (0x1EA8, 0x1EA9), (0x1EAA, 0x1EAB), (0x1EAC, 0x1EAD), (0x1EAE, 0x1EAF),
+        (0x1EB0, 0x1EB1), (0x1EB2, 0x1EB3), (0x1EB4, 0x1EB5), (0x1EB6, 0x1EB7), (0x1EB8, 0x1EB9), (0x1EBA, 0x1EBB),
+        (0x1EBC, 0x1EBD), (0x1EBE, 0x1EBF), (0x1EC0, 0x1EC1), (0x1EC2, 0x1EC3), (0x1EC4, 0x1EC5), (0x1EC6, 0x1EC7),
+        (0x1EC8, 0x1EC9), (0x1ECA, 0x1ECB), (0x1ECC, 0x1ECD), (0x1ECE, 0x1ECF), (0x1ED0, 0x1ED1), (0x1ED2, 0x1ED3),
+        (0x1ED4, 0x1ED5), (0x1ED6, 0x1ED7), (0x1ED8, 0x1ED9), (0x1EDA, 0x1EDB), (0x1EDC, 0x1EDD), (0x1EDE, 0x1EDF),
+        (0x1EE0, 0x1EE1), (0x1EE2, 0x1EE3), (0x1EE4, 0x1EE5), (0x1EE6, 0x1EE7), (0x1EE8, 0x1EE9), (0x1EEA, 0x1EEB),
+        (0x1EEC, 0x1EED), (0x1EEE, 0x1EEF), (0x1EF0, 0x1EF1), (0x1EF2, 0x1EF3), (0x1EF4, 0x1EF5), (0x1EF6, 0x1EF7),
+        (0x1EF8, 0x1EF9), (0x1EFA, 0x1EFB), (0x1EFC, 0x1EFD), (0x1EFE, 0x1EFF)]
+
+fn expected_lower(pairs: [(Int, Int)], cp: Int) -> Int
+    for p in pairs
+        if p.0 == cp
+            return p.1
+    cp
+
+@test
+fn test_the_case_mappings_agree_with_python_over_every_claimed_codepoint() [io]
+    let pairs = python_pairs()
+    test.case("424 pairs in the claimed ranges")
+    test.assert(list.len(pairs) == 424)
+
+    test.case("every codepoint of Latin-1 and Latin Extended-A lowers as Python lowers it")
+    var wrong = 0
+    for cp in 0..0x180
+        if fuzzypat.simple_lower(cp) != expected_lower(pairs, cp)
+            wrong = wrong + 1
+    test.assert(wrong == 0)
+
+    test.case("so does every basic Greek letter, the Cyrillic block and its supplement")
+    for cp in 0x386..0x3AC
+        if fuzzypat.simple_lower(cp) != expected_lower(pairs, cp)
+            wrong = wrong + 1
+    for cp in 0x400..0x530
+        if fuzzypat.simple_lower(cp) != expected_lower(pairs, cp)
+            wrong = wrong + 1
+    test.assert(wrong == 0)
+
+    test.case("and Latin Extended Additional, the Vietnamese letters among them")
+    for cp in 0x1E00..0x1F00
+        if fuzzypat.simple_lower(cp) != expected_lower(pairs, cp)
+            wrong = wrong + 1
+    test.assert(wrong == 0)
+
+    test.case("a codepoint outside the ranges compares as itself")
+    test.assert(fuzzypat.simple_lower(0x10A0) == 0x10A0)
+    test.assert(not fuzzypat.chars_equal(0x10A0, 0x2D00, FuzzyCaseIgnore))
+
+    test.case("so under ignore, Greek and Cyrillic compare across case")
+    test.assert(fuzzypat.chars_equal(0x3A9, 0x3C9, FuzzyCaseIgnore))
+    test.assert(fuzzypat.chars_equal(0x416, 0x436, FuzzyCaseIgnore))

@@ -1,65 +1,73 @@
 // fuzzypat.nv — the needle, compiled once.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// A pattern is a needle compiled into the terms and atoms of fzf's
+// extended search syntax, with the case rule resolved.  A picker over a
+// hundred thousand candidates compiles one pattern per keystroke and
+// matches every candidate against it, so the splitting, the sigils and
+// the smart-case decision happen once and not once per candidate.
 //
-// **THE LOAD-BEARING INTERFACE OF THIS PACKAGE IS `FuzzyPattern`.**
-// The API a completion menu actually needs is "one needle, a hundred
-// thousand candidates, recomputed on every keystroke", and the obvious
-// signature —
+// The syntax is the SEARCH SYNTAX table of `man fzf`.  Terms are
+// separated by spaces and every term must be satisfied.  Inside a term,
+// a `|` standing alone between two atoms makes an alternation, and
+// either atom satisfies it.  An atom is one of these:
 //
-//     fn score(needle: Str, haystack: Str) -> Int
+//     sbtrkt      a subsequence, scored
+//     'wild       a literal substring
+//     ^music      a literal at the start
+//     .mp3$       a literal at the end
+//     ^main.nv$   the whole candidate, literally
+//     !fire       a candidate that does not contain `fire` literally
+//     !'fire      a candidate that does not contain `fire` as a subsequence
+//     !^music     a candidate that does not start with `music`
 //
-// — redoes the needle's work once per candidate. What that work is,
-// concretely: splitting the needle into fzf's terms, deciding the case
-// policy under smart-case, and cutting each term into the clusters the
-// matcher advances over. A `FuzzyPattern` is that done once, and the
-// per-candidate call is then a walk over the haystack and nothing
-// else.
+// A negated atom is literal unless it is quoted, which is fzf's rule:
+// `!` makes the atom exact and `'` flips exactness.  A backslash before
+// a space makes the space part of the atom.
 //
-// The second thing the type buys is a PLACE TO PUT fzf's extended
-// search syntax. `'wild` is exact, `^music` is a prefix, `.mp3$` is a
-// suffix, `!fire` is a negation, and `a | b` is an alternation inside
-// one term; terms are separated by spaces and every one of them must
-// match. None of that can live in a two-string function signature, so
-// a library shaped that way pushes it into every consumer — and every
-// consumer implements a different subset of it.
+// A pattern is a value and holds no state.  Matching does not change
+// it, so one pattern can be matched against a list in any order.
 //
-// A `FuzzyPattern` IS A VALUE AND HOLDS NO STATE. Matching does not
-// mutate it, so one pattern can be matched against a list in any order,
-// and a caller that wants to keep the last pattern beside the last
-// query keeps two values.
+// Smart case is fzf's default: the comparison ignores case unless the
+// needle contains an upper-case letter.  It is a property of the needle,
+// so it is resolved when the pattern is compiled, and the resolved
+// policy is a field a caller can read.
 //
-// SMART CASE IS RESOLVED AT COMPILE TIME, NOT PER CANDIDATE. fzf's
-// rule is "case-insensitive unless the needle contains an upper-case
-// character", which is a property of the needle; deciding it once is
-// both faster and the only way `FuzzyPattern.effective_case` can be a
-// field a caller can read to explain the behaviour to a person.
+// Ignoring case means comparing the simple lowercase mappings of the
+// two codepoints.  The mappings held here are those of the Latin, Greek
+// and Cyrillic letters in Latin-1, Latin Extended-A, Latin Extended
+// Additional, the basic Greek letters and the Cyrillic block with its
+// supplement.  They need no data table.  Every other codepoint compares
+// as itself.  Full Unicode case folding needs unicode-nv's case table,
+// and a caller who wants it folds the needle and the candidates with
+// `ucase.fold` first.
+
+use std.str
+use std.list
+use uclass
 
 // How upper and lower case are compared.
 pub enum FuzzyCase
     // fzf's default: ignore case unless the needle contains an
-    // upper-case character, in which case respect it. Resolved when
+    // upper-case character, in which case respect it.  Resolved when
     // the pattern is compiled, and the answer is readable afterwards.
     FuzzyCaseSmart
-    // Never distinguish. ASCII folding plus `uclass`'s simple case
-    // rules; full Unicode folding is `ucase.fold` and is the caller's
-    // to apply, because it needs the 245 KB case table this package
-    // will not make a completion menu carry.
+    // Never distinguish, under the simple lowercase mappings the module
+    // comment lists.
     FuzzyCaseIgnore
     // Always distinguish.
     FuzzyCaseRespect
 
 // What one atom of a term demands of a candidate.
 pub enum FuzzyAtomKind
-    // A subsequence, scored. The default, and what a bare word is.
+    // A subsequence, scored.  The default, and what a bare word is.
     FuzzyAtomFuzzy
-    // A literal substring. fzf's `'wild`.
+    // A literal substring.  fzf's `'wild`, and the default under `!`.
     FuzzyAtomExact
-    // A literal at the start. fzf's `^music`.
+    // A literal at the start.  fzf's `^music`.
     FuzzyAtomPrefix
-    // A literal at the end. fzf's `.mp3$`.
+    // A literal at the end.  fzf's `.mp3$`.
     FuzzyAtomSuffix
-    // The whole candidate, literally. fzf's `^exact$`.
+    // The whole candidate, literally.  fzf's `^exact$`.
     FuzzyAtomEqual
 
 // One demand.
@@ -67,52 +75,45 @@ pub struct FuzzyAtom
     kind: FuzzyAtomKind
     // The text this atom matches, with its sigils removed.
     needle: Str
-    // `!` in front: the candidate must NOT satisfy this atom. A
-    // negated atom contributes no score and no positions — it is a
-    // filter — which is why it is a flag here rather than a kind of
-    // its own.
+    // `!` in front: the candidate must not satisfy this atom.  A negated
+    // atom contributes no score and no positions, so it is a filter.  It
+    // is a flag rather than a kind because any kind can be negated.
     negated: Bool
 
-// One space-separated term: the atoms it was written with, ANY of
-// which satisfies it.
+// One space-separated term: the atoms it was written with, any of which
+// satisfies it.
 //
 // fzf spells alternation `a | b` inside a term and conjunction with a
-// space between terms. Two levels and not one, because a flat list
-// cannot express `(png | jpg) !thumb`, which is the query a person
-// actually types.
+// space between terms.  There are two levels because a flat list cannot
+// hold `png | jpg !thumb`.
 pub struct FuzzyTerm
     atoms: [FuzzyAtom]
 
 // A needle, compiled.
 pub struct FuzzyPattern
-    // The query as it was typed, kept so a UI can echo it.
+    // The query as it was typed, kept so an interface can echo it.
     source: Str
-    // Every term; all of them must be satisfied.
+    // Every term.  All of them must be satisfied.
     terms: [FuzzyTerm]
-    // The policy as WRITTEN.
+    // The case policy as written.
     requested_case: FuzzyCase
-    // The policy as RESOLVED — `FuzzyCaseSmart` never appears here.
-    // Readable so an interface can tell a person why `Foo` stopped
-    // matching `foobar`.
+    // The case policy as resolved.  `FuzzyCaseSmart` never appears here,
+    // so an interface can tell a person why `Foo` stopped matching
+    // `foobar`.
     effective_case: FuzzyCase
 
-// Why a query could not be compiled. Every variant carries the byte
-// offset in the query, because a query is something a person is
-// typing and the report goes under the cursor.
+// Why a query could not be compiled.  Every variant carries a byte
+// offset in the query, because a query is something a person is typing
+// and the report goes under the cursor.
 pub enum FuzzyPatternError
-    // `!` or `^` or `$` with nothing to apply to.
+    // `!`, `'`, `^` or `$` with nothing to apply to.  The offset is the
+    // start of the atom.
     FuzzyPatternDanglingSigil(at: Int)
-    // An unterminated `'` quote.
-    FuzzyPatternUnclosedQuote(at: Int)
-    // A `|` at the start or end of a term, or two in a row.
+    // A `|` at the start or the end of the query, or two in a row.  The
+    // offset is the `|`.
     FuzzyPatternDanglingAlternation(at: Int)
 
 // The one-line message, for a caller printing rather than matching.
-//
-// `Result<T, FuzzyPatternError>` requires it — SPEC § 3.4 makes
-// `Error` the bound on a result's error type — so the impl exists
-// whether or not an interface release has anything to say yet, and its
-// body is a `todo()` like every other body here.
 //
 // ```novo
 // use fuzzypat
@@ -122,16 +123,28 @@ pub enum FuzzyPatternError
 //     Err(e) => println(e.message())
 // ```
 impl Error for FuzzyPatternError
-    // Panics with `not implemented` until the bodies land.
+    // The sentence names the rule and the byte offset.
     fn message(self) -> Str
-        todo("fuzzy-nv.FuzzyPatternError.message")
+        match self
+            FuzzyPatternDanglingSigil(at)       =>
+                "the search sigil at byte ${at} has no text to apply to"
+            FuzzyPatternDanglingAlternation(at) =>
+                "the `|` at byte ${at} has no atom on one side"
 
-// Compile a plain needle: one fuzzy atom, no syntax, nothing to
-// refuse.
+// The class `char_class` answers for a letter or a digit.
+pub const CLASS_WORD = 2
+
+// The class `char_class` answers for whitespace and the separators
+// `/ \ , : ; | - _ .` that start a new word.
+pub const CLASS_SEPARATOR = 1
+
+// The class `char_class` answers for everything else.
+pub const CLASS_OTHER = 0
+
+// Compile a plain needle: one fuzzy atom, no syntax, nothing to refuse.
 //
-// The call a completion menu that does not want fzf's query language
-// makes — and it cannot fail, which is why it is separate from
-// `parse`.
+// The needle is taken as text, so fzf's sigils in it are characters to
+// match.  An empty needle compiles to a pattern with no terms.
 //
 // ```novo
 // use fuzzypat
@@ -140,9 +153,16 @@ impl Error for FuzzyPatternError
 // println(str.from_int(list.len(p.terms)))   // 1
 // ```
 pub fn literal(needle: Str, case: FuzzyCase) -> FuzzyPattern []
-    todo("fuzzy-nv.fuzzypat.literal")
+    var terms: [FuzzyTerm] = []
+    if str.len(needle) > 0
+        let atom = FuzzyAtom { kind: FuzzyAtomFuzzy, needle: needle, negated: false }
+        list.push(terms, FuzzyTerm { atoms: [atom] })
+    FuzzyPattern { source: needle, terms: terms, requested_case: case,
+                   effective_case: resolve_case(case, needle) }
 
 // Compile a query in fzf's extended search syntax.
+//
+// A query of nothing but spaces compiles to a pattern with no terms.
 //
 // ```novo
 // use fuzzypat
@@ -152,63 +172,306 @@ pub fn literal(needle: Str, case: FuzzyCase) -> FuzzyPattern []
 //     Err(_) => println("bad query")
 // ```
 pub fn parse(query: Str, case: FuzzyCase) -> Result<FuzzyPattern, FuzzyPatternError> []
-    todo("fuzzy-nv.fuzzypat.parse")
+    var terms: [FuzzyTerm] = []
+    var group: [FuzzyAtom] = []
+    // The offset of a `|` still waiting for the atom after it, or -1.
+    var open_bar = 0 - 1
+    for tok in tokens(query)
+        if tok.text == "|" and not tok.escaped
+            if list.len(group) == 0 or open_bar >= 0
+                return Err(FuzzyPatternDanglingAlternation(tok.start))
+            open_bar = tok.start
+        else
+            let Some(atom) = parse_atom(tok.text) else return Err(FuzzyPatternDanglingSigil(tok.start))
+            if open_bar < 0 and list.len(group) > 0
+                list.push(terms, FuzzyTerm { atoms: group })
+                group = []
+            list.push(group, atom)
+            open_bar = 0 - 1
+    if open_bar >= 0
+        return Err(FuzzyPatternDanglingAlternation(open_bar))
+    if list.len(group) > 0
+        list.push(terms, FuzzyTerm { atoms: group })
+    Ok(FuzzyPattern { source: query, terms: terms, requested_case: case,
+                      effective_case: resolve_case(case, query) })
 
 // The byte offset in the query a compile error is about, for a caller
 // reporting it without matching on every variant.
 pub fn error_at(e: FuzzyPatternError) -> Int []
-    todo("fuzzy-nv.fuzzypat.error_at")
+    match e
+        FuzzyPatternDanglingSigil(at)       => at
+        FuzzyPatternDanglingAlternation(at) => at
 
-// Whether the pattern demands nothing — an empty query.
+// Whether the pattern demands nothing: an empty query, or one of spaces.
 //
-// A named call because the right behaviour for an empty query is
-// "everything matches, in producer order", and a caller that tested
-// `str.len(query) == 0` would get it wrong for a query of spaces.
+// Everything matches an empty pattern, in the order the candidates were
+// given.
 pub fn is_empty(p: FuzzyPattern) -> Bool []
-    todo("fuzzy-nv.fuzzypat.is_empty")
+    list.len(p.terms) == 0
 
-// Whether every atom in the pattern is negated. Such a pattern is a
-// pure filter: it has no score to give, so a ranking over it is the
-// producer's order and a caller can skip the sort entirely.
-pub fn is_filter_only(p: FuzzyPattern) -> Bool []
-    todo("fuzzy-nv.fuzzypat.is_filter_only")
-
-// How many atoms, negated ones included — the number a UI shows beside
-// a query, and the loop bound a caller writing its own matcher needs.
-pub fn atom_count(p: FuzzyPattern) -> Int []
-    todo("fuzzy-nv.fuzzypat.atom_count")
-
-// The case policy fzf's smart-case rule resolves `needle` to.
+// Whether the pattern has atoms and every one of them is negated.
 //
-// Published because a caller that compiles its own atoms still wants
-// the rule, and because it is the rule people are surprised by.
+// Such a pattern is a filter.  It has no score to give, so a ranking
+// over it is the order the candidates were given.
+pub fn is_filter_only(p: FuzzyPattern) -> Bool []
+    if list.len(p.terms) == 0
+        return false
+    for t in p.terms
+        for a in t.atoms
+            if not a.negated
+                return false
+    true
+
+// How many atoms the pattern holds, negated ones included.
+pub fn atom_count(p: FuzzyPattern) -> Int []
+    var n = 0
+    for t in p.terms
+        n = n + list.len(t.atoms)
+    n
+
+// The case policy fzf's smart-case rule resolves `needle` to:
+// `FuzzyCaseRespect` when it holds an upper-case codepoint, and
+// `FuzzyCaseIgnore` otherwise.
+//
+// Upper case is Unicode's Uppercase property, so `Ärger` and `Ωmega`
+// resolve to respect as `Foo` does.
 pub fn smart_case_of(needle: Str) -> FuzzyCase []
-    todo("fuzzy-nv.fuzzypat.smart_case_of")
+    for c in str.chars(needle)
+        if uclass.is_uppercase(codepoint_at(c, 0))
+            return FuzzyCaseRespect
+    FuzzyCaseIgnore
 
 // Two codepoints compared under a case policy.
 //
-// The one place case is decided, so a caller extending this package
-// compares the same way it does. `uclass`'s simple case mapping is
-// what makes it right past ASCII.
+// `FuzzyCaseRespect` compares them as they are.  `FuzzyCaseIgnore`
+// compares their simple lowercase mappings, and so does
+// `FuzzyCaseSmart`, which has no needle here to resolve against.
 pub fn chars_equal(a: Int, b: Int, case: FuzzyCase) -> Bool []
-    todo("fuzzy-nv.fuzzypat.chars_equal")
+    if a == b
+        return true
+    match case
+        FuzzyCaseRespect => false
+        _                => simple_lower(a) == simple_lower(b)
 
-// What class of character `ch` is, for the bonus table: the answer
-// `uclass` gives, reduced to the three distinctions fzf's table makes
-// — alphanumeric, a separator, or neither.
+// The class of `ch` for the bonus table: `CLASS_WORD` for a letter or a
+// digit, `CLASS_SEPARATOR` for whitespace and the separators
+// `/ \ , : ; | - _ .`, and `CLASS_OTHER` for everything else.
 //
-// Answered as an `Int` rather than an enum of this package's own
-// because it indexes a table, and because the table is
-// `FuzzyBonus`'s, which a caller may replace.
+// Letters and digits are Unicode's Alphabetic and Nd, so a Greek or a
+// Cyrillic identifier is a word as an English one is.
 pub fn char_class(ch: Int) -> Int []
-    todo("fuzzy-nv.fuzzypat.char_class")
+    if uclass.is_alphanumeric(ch)
+        return CLASS_WORD
+    if uclass.is_whitespace(ch) or is_separator_char(ch)
+        return CLASS_SEPARATOR
+    CLASS_OTHER
 
-// Whether `ch` is a path separator for the purposes of the path
-// bonus: `/` always, and `\` as well when the caller says the
-// candidates are Windows paths.
-//
-// A parameter rather than a build-time constant, because a program
-// that ranks remote paths on one platform and local paths on another
-// needs both in the same process.
+// Whether `ch` is a path separator for the path bonus: `/` always, and
+// `\` as well when the caller says the candidates are Windows paths.
 pub fn is_path_separator(ch: Int, windows: Bool) -> Bool []
-    todo("fuzzy-nv.fuzzypat.is_path_separator")
+    ch == '/' or windows and ch == '\\'
+
+// The codepoint whose UTF-8 encoding starts at byte `at`.  A byte that
+// does not start a well-formed sequence answers itself, so a string
+// that is not UTF-8 is still walked one byte at a time.
+fn codepoint_at(s: Str, at: Int) -> Int
+    let b0 = str.byte_at_or(s, at, 0)
+    let len = codepoint_len(s, at)
+    if len == 1
+        return b0
+    var cp = if len == 2
+        b0 & 0x1F
+    else
+        if len == 3
+            b0 & 0x0F
+        else
+            b0 & 0x07
+    for k in 1..len
+        cp = (cp << 6) | (str.byte_at_or(s, at + k, 0) & 0x3F)
+    cp
+
+// The length in bytes of the codepoint starting at `at`: 1 for ASCII
+// and for any byte that does not start a complete sequence.
+fn codepoint_len(s: Str, at: Int) -> Int
+    let b0 = str.byte_at_or(s, at, 0)
+    let want = sequence_length(b0)
+    for k in 1..want
+        if (str.byte_at_or(s, at + k, 0) & 0xC0) != 0x80
+            return 1
+    want
+
+// How many bytes a UTF-8 sequence starting with `b0` holds, and 1 for
+// a byte that cannot start one.
+fn sequence_length(b0: Int) -> Int
+    if b0 < 0xC2
+        return 1
+    if b0 < 0xE0
+        return 2
+    if b0 < 0xF0
+        return 3
+    if b0 < 0xF5
+        4
+    else
+        1
+
+// The simple lowercase mapping for the letters the module comment
+// lists, and the codepoint itself for every other.  The ranges are
+// Unicode 16.0.0's UnicodeData.txt, read as runs where the distance
+// from upper to lower case is constant.
+fn simple_lower(ch: Int) -> Int
+    if ch < 0x80
+        return if ch >= 'A' and ch <= 'Z' then ch + 32 else ch
+    if ch < 0x100
+        return if ch >= 0xC0 and ch <= 0xDE and ch != 0xD7 then ch + 32 else ch
+    if ch < 0x180
+        return latin_extended_a_lower(ch)
+    if ch >= 0x386 and ch <= 0x3AB
+        return greek_lower(ch)
+    if ch >= 0x400 and ch < 0x530
+        return cyrillic_lower(ch)
+    if ch == 0x1E9E
+        return 0xDF
+    if ch >= 0x1E00 and ch <= 0x1E94 or ch >= 0x1EA0 and ch <= 0x1EFF
+        return even_upper(ch)
+    ch
+
+// Latin Extended-A.  The capital is on the even codepoint of a pair in
+// two runs and on the odd one in two others.  U+0130, capital I with a
+// dot above, lowers to a plain `i` under the simple mapping.
+fn latin_extended_a_lower(ch: Int) -> Int
+    if ch == 0x130
+        return 'i'
+    if ch == 0x178
+        return 0xFF
+    if ch >= 0x100 and ch <= 0x137 and ch != 0x131 or ch >= 0x14A and ch <= 0x177
+        return even_upper(ch)
+    if ch >= 0x139 and ch <= 0x148 or ch >= 0x179 and ch <= 0x17E
+        return if ch % 2 == 1 then ch + 1 else ch
+    ch
+
+// The basic Greek capitals and the accented ones before them.
+fn greek_lower(ch: Int) -> Int
+    if ch == 0x386
+        return 0x3AC
+    if ch >= 0x388 and ch <= 0x38A
+        return ch + 37
+    if ch == 0x38C
+        return 0x3CC
+    if ch == 0x38E or ch == 0x38F
+        return ch + 63
+    if ch >= 0x391 and ch != 0x3A2
+        return ch + 32
+    ch
+
+// The Cyrillic block and its supplement.
+fn cyrillic_lower(ch: Int) -> Int
+    if ch < 0x410
+        return ch + 80
+    if ch < 0x430
+        return ch + 32
+    if ch == 0x4C0
+        return 0x4CF
+    if ch >= 0x460 and ch <= 0x481 or ch >= 0x48A and ch <= 0x4BF or ch >= 0x4D0
+        return even_upper(ch)
+    if ch >= 0x4C1 and ch <= 0x4CE
+        return if ch % 2 == 1 then ch + 1 else ch
+    ch
+
+// The lower half of a pair whose capital sits on the even codepoint.
+fn even_upper(ch: Int) -> Int
+    if ch % 2 == 0
+        ch + 1
+    else
+        ch
+
+// The separators that open a word, besides whitespace.
+fn is_separator_char(ch: Int) -> Bool
+    ch == '/' or ch == '\\' or ch == ',' or ch == ':' or ch == ';' or ch == '|'
+        or ch == '-' or ch == '_' or ch == '.'
+
+// The policy a pattern compiled from `text` resolves to.
+fn resolve_case(case: FuzzyCase, text: Str) -> FuzzyCase
+    match case
+        FuzzyCaseSmart => smart_case_of(text)
+        _              => case
+
+// One space-separated token of a query, with `\ ` read as a space
+// inside the token.
+struct Token
+    text: Str
+    // The byte offset the token starts at, which a refusal reports.
+    start: Int
+    // Whether the token held an escaped space.  A token of `\ |` is text
+    // and not an alternation.
+    escaped: Bool
+
+// The tokens of a query, in one pass over its bytes.  A space ends a
+// token unless a backslash precedes it.
+fn tokens(q: Str) -> [Token]
+    let n = str.len(q)
+    var out: [Token] = []
+    var parts: [Str] = []
+    // Where the current token starts, or -1 between tokens, and where its
+    // current run of unescaped bytes starts.
+    var start = 0 - 1
+    var run = 0
+    var escaped = false
+    var skip = false
+    for i in 0..n
+        if skip
+            skip = false
+            continue
+        let b = str.byte_at_or(q, i, 0)
+        if b == ' '
+            if start >= 0
+                list.push(parts, str.slice(q, run, i))
+                list.push(out, Token { text: str.join(parts, ""), start: start, escaped: escaped })
+                parts = []
+                start = 0 - 1
+                escaped = false
+            continue
+        if start < 0
+            start = i
+            run = i
+        if b == '\\' and str.byte_at_or(q, i + 1, 0) == ' '
+            list.push(parts, str.slice(q, run, i))
+            list.push(parts, " ")
+            escaped = true
+            skip = true
+            run = i + 2
+    if start >= 0
+        list.push(parts, str.slice(q, run, n))
+        list.push(out, Token { text: str.join(parts, ""), start: start, escaped: escaped })
+    out
+
+// One atom from one token, in the order fzf's `parseTerms` reads the
+// sigils: `!`, then a trailing `$`, then a leading `'` or `^`.  `None`
+// when the sigils leave nothing to match.
+fn parse_atom(token: Str) -> ?FuzzyAtom
+    var text = token
+    var kind = FuzzyAtomFuzzy
+    var negated = false
+    var suffix = false
+    if str.starts_with(text, "!")
+        negated = true
+        kind = FuzzyAtomExact
+        text = str.slice(text, 1, str.len(text))
+    if str.ends_with(text, "$")
+        suffix = true
+        kind = FuzzyAtomSuffix
+        text = str.slice(text, 0, str.len(text) - 1)
+    if str.starts_with(text, "'")
+        kind = if negated
+            FuzzyAtomFuzzy
+        else
+            FuzzyAtomExact
+        text = str.slice(text, 1, str.len(text))
+    else if str.starts_with(text, "^")
+        kind = if suffix
+            FuzzyAtomEqual
+        else
+            FuzzyAtomPrefix
+        text = str.slice(text, 1, str.len(text))
+    if str.len(text) == 0
+        return None
+    Some(FuzzyAtom { kind: kind, needle: text, negated: negated })

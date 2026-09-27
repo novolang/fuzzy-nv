@@ -1,46 +1,39 @@
-// fuzzydist.nv — the classic string distances, and the cutoff that
-// makes them usable.
+// fuzzydist.nv — the classic string distances, each with the bounded
+// form that makes it fast.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// This module answers a different question from the rest of the
+// package.  `fuzzyscore` asks whether a short needle occurs in a longer
+// candidate, and how well.  A distance asks how far apart two strings
+// of similar length are, and it is symmetric.  A "did you mean" over
+// command names, a spell checker's candidate filter and a deduplicator
+// want a distance.  A completion menu wants a score.
 //
-// A DIFFERENT QUESTION FROM THE REST OF THIS PACKAGE, which is why it
-// is a module of its own. `fuzzyscore` answers "does this needle occur
-// in this candidate, and how well" — a subsequence question, over a
-// needle much shorter than its haystack. This module answers "how far
-// apart are these two strings" — a symmetric question over two strings
-// of similar length. A did-you-mean over command names, a spell
-// checker's candidate filter and a deduplicator all want this one; a
-// completion menu wants the other. Mixing them is how a picker ends up
-// ranking by edit distance and feeling wrong.
+// Every distance is counted in grapheme clusters, not bytes.  A byte
+// count would say a two-byte `é` is two edits from nothing.  Two
+// clusters are equal when their bytes are, so the comparison respects
+// case and does not normalise; a caller who wants either applies it to
+// both strings first.
 //
-// **EVERY DISTANCE HAS A BOUNDED FORM, AND IT IS THE ONE TO USE.**
-// `levenshtein_within(a, b, max)` answers `None` as soon as the
-// distance is known to exceed `max`, which lets the dynamic program
-// fill a diagonal band of width `2 * max + 1` instead of the whole
-// matrix. For the question a did-you-mean actually asks — "which of
-// these 300 command names is within 2 edits of what was typed" — that
-// is the difference between linear and quadratic work per candidate.
-// rapidfuzz's `score_cutoff` is the same idea and is most of why
-// rapidfuzz is fast; publishing only the unbounded form would be
-// publishing the slow half.
+// The bounded forms answer `None` as soon as the distance is known to
+// exceed the bound.  `levenshtein_within` fills only the diagonal band
+// of width `2 * max + 1` of the table, and both bounded forms stop at
+// the first row whose cells all exceed the bound.  For "which of these
+// three hundred names is within two edits" that is linear rather than
+// quadratic work per name.  rapidfuzz's `score_cutoff` is the same idea.
 //
-// THE TWO DAMERAU DISTANCES ARE BOTH NAMED. "Damerau-Levenshtein"
-// means two different metrics: the optimal string alignment distance,
-// which forbids editing a substring twice, and the unrestricted one,
-// which does not. `osa("ca", "abc")` is 3 and `damerau("ca", "abc")`
-// is 2. Libraries routinely ship one under the other's name; this
-// package ships both under their own, and says which is which.
-//
-// UNITS ARE GRAPHEME CLUSTERS, NOT BYTES. An edit distance counted in
-// bytes says a two-byte `é` is two edits from nothing, which is wrong
-// for every purpose anybody counts edits for. The costs here are per
-// cluster, via `ugrapheme`.
+// "Damerau-Levenshtein" names two metrics, and both are here under
+// their own names.  `osa` is the optimal string alignment distance,
+// which forbids editing a substring twice.  `damerau` is the
+// unrestricted distance of Lowrance and Wagner.  `osa("ca", "abc")` is 3
+// and `damerau("ca", "abc")` is 2.
 
-// The similarity two strings have, as a value in `[0.0, 1.0]`.
-//
-// A type of its own would be over-engineering; the doc comment is
-// where the range is promised, and every function answering one says
-// so.
+use std.str
+use std.list
+use ugrapheme
+
+// The largest value a bounded distance stands in for "further than the
+// bound" with, inside its table.
+const FAR = 1000000000
 
 // Levenshtein distance: insertions, deletions and substitutions, one
 // each, counted in grapheme clusters.
@@ -51,14 +44,12 @@
 // println(str.from_int(fuzzydist.levenshtein("kitten", "sitting")))   // 3
 // ```
 pub fn levenshtein(a: Str, b: Str) -> Int []
-    todo("fuzzy-nv.fuzzydist.levenshtein")
+    levenshtein_weighted(a, b, 1, 1, 1)
 
-// Levenshtein, abandoned as soon as the answer is known to exceed
-// `max`.
+// Levenshtein distance, or `None` when it is greater than `max`.
 //
-// THE CALL TO MAKE. See the module comment: the bound turns a
-// quadratic fill into a band of width `2 * max + 1`, which is what a
-// did-you-mean over three hundred command names needs.
+// Only the band of the table within `max` of the diagonal is filled, and
+// the walk stops at the first row that has no cell within `max`.
 //
 // ```novo
 // use fuzzydist
@@ -68,62 +59,199 @@ pub fn levenshtein(a: Str, b: Str) -> Int []
 //     None    => println("further than 2")
 // ```
 pub fn levenshtein_within(a: Str, b: Str, max: Int) -> ?Int []
-    todo("fuzzy-nv.fuzzydist.levenshtein_within")
+    let x = clusters_of(a)
+    let y = clusters_of(b)
+    let n = list.len(x)
+    let m = list.len(y)
+    if max < 0 or abs(n - m) > max
+        return None
+    var prev: [Int] = []
+    for j in 0..m + 1
+        list.push(prev, (if j <= max then j else FAR))
+    for i in 1..n + 1
+        var cur: [Int] = []
+        list.push(cur, (if i <= max then i else FAR))
+        var row_min = cur[0]
+        for j in 1..m + 1
+            var v = FAR
+            if abs(i - j) <= max
+                let sub = prev[j - 1] + (if x[i - 1] == y[j - 1] then 0 else 1)
+                v = min3(sub, prev[j] + 1, cur[j - 1] + 1)
+            list.push(cur, v)
+            row_min = if v < row_min
+                v
+            else
+                row_min
+        if row_min > max
+            return None
+        prev = cur
+    if prev[m] <= max
+        Some(prev[m])
+    else
+        None
 
-// Levenshtein with per-operation costs — the form a spell checker
-// wants, where a substitution is usually cheaper than an insertion
-// plus a deletion, and the form a diff-like alignment wants, where it
-// is not.
+// Levenshtein distance with a cost per operation.  Turning `a` into `b`,
+// `insert` is paid for each cluster of `b` added, `delete` for each
+// cluster of `a` removed, and `substitute` for each cluster replaced.
+//
+// A spell checker makes a substitution cheaper than an insertion plus a
+// deletion.  An alignment in the manner of a diff makes it dearer.
 pub fn levenshtein_weighted(a: Str, b: Str, insert: Int, delete: Int, substitute: Int) -> Int []
-    todo("fuzzy-nv.fuzzydist.levenshtein_weighted")
+    let x = clusters_of(a)
+    let y = clusters_of(b)
+    var prev: [Int] = []
+    for j in 0..list.len(y) + 1
+        list.push(prev, j * insert)
+    for i in 1..list.len(x) + 1
+        var cur: [Int] = [i * delete]
+        for j in 1..list.len(y) + 1
+            let sub = prev[j - 1] + (if x[i - 1] == y[j - 1] then 0 else substitute)
+            list.push(cur, min3(sub, prev[j] + delete, cur[j - 1] + insert))
+        prev = cur
+    prev[list.len(y)]
 
-// Optimal string alignment distance: Levenshtein plus transposition of
-// two ADJACENT clusters, with no substring edited twice.
+// Optimal string alignment distance: Levenshtein, plus the
+// transposition of two adjacent clusters, with no substring edited
+// twice.
 //
-// `osa("ca", "abc")` is 3. This is what most libraries ship as
-// "Damerau-Levenshtein"; it is not the same metric, and it is not a
-// metric at all — it violates the triangle inequality.
+// `osa("ca", "abc")` is 3.  It is what many libraries ship as
+// "Damerau-Levenshtein", and it is not a metric: it breaks the triangle
+// inequality.
 pub fn osa(a: Str, b: Str) -> Int []
-    todo("fuzzy-nv.fuzzydist.osa")
+    osa_table(clusters_of(a), clusters_of(b), FAR) ?? 0
 
-// Unrestricted Damerau-Levenshtein: transpositions with no
-// restriction on re-editing.
+// Unrestricted Damerau-Levenshtein distance: transpositions of adjacent
+// clusters, with later edits between them allowed.
 //
-// `damerau("ca", "abc")` is 2. A true metric, and the more expensive
-// of the two.
+// `damerau("ca", "abc")` is 2.  It is a metric.
 pub fn damerau(a: Str, b: Str) -> Int []
-    todo("fuzzy-nv.fuzzydist.damerau")
+    let x = clusters_of(a)
+    let y = clusters_of(b)
+    let n = list.len(x)
+    let m = list.len(y)
+    let inf = n + m
+    // The table is offset by one row and one column holding `inf`, as in
+    // Lowrance and Wagner's algorithm.
+    let w = m + 2
+    var d = list.zeros((n + 2) * w)
+    d[0] = inf
+    for i in 0..n + 1
+        d[(i + 1) * w] = inf
+        d[(i + 1) * w + 1] = i
+    for j in 0..m + 1
+        d[j + 1] = inf
+        d[w + j + 1] = j
+    // The last row of `a` each cluster was seen in.
+    var seen_text: [Str] = []
+    var seen_row: [Int] = []
+    for i in 1..n + 1
+        var db = 0
+        for j in 1..m + 1
+            let i1 = last_row(seen_text, seen_row, y[j - 1])
+            let j1 = db
+            var cost = 1
+            if x[i - 1] == y[j - 1]
+                cost = 0
+                db = j
+            let sub = d[i * w + j] + cost
+            let ins = d[(i + 1) * w + j] + 1
+            let del = d[i * w + j + 1] + 1
+            let trans = d[i1 * w + j1] + (i - i1 - 1) + 1 + (j - j1 - 1)
+            d[(i + 1) * w + j + 1] = min3(sub, ins, (if del < trans then del else trans))
+        remember(seen_text, seen_row, x[i - 1], i)
+    d[(n + 1) * w + m + 1]
 
-// The same, abandoned past `max`.
+// Optimal string alignment distance, or `None` when it is greater than
+// `max`.  The walk stops once two rows in a row have no cell within
+// `max`, since a transposition reaches back only one row further.
 pub fn osa_within(a: Str, b: Str, max: Int) -> ?Int []
-    todo("fuzzy-nv.fuzzydist.osa_within")
+    let x = clusters_of(a)
+    let y = clusters_of(b)
+    if max < 0 or abs(list.len(x) - list.len(y)) > max
+        return None
+    osa_table(x, y, max)
 
-// Hamming distance: differing clusters, position by position.
+// Hamming distance: the number of positions at which the clusters
+// differ.
 //
-// `None` when the two strings have different cluster counts, rather
-// than a number that would compare wrongly with one from an equal-length
-// pair. Hamming is only defined for equal lengths, and returning the
-// length difference instead — which several libraries do — makes it
-// silently not Hamming.
+// `None` when the two strings hold different numbers of clusters.
+// Hamming distance is defined only for equal lengths, and a length
+// difference in its place would compare wrongly with a real one.
 pub fn hamming(a: Str, b: Str) -> ?Int []
-    todo("fuzzy-nv.fuzzydist.hamming")
+    let x = clusters_of(a)
+    let y = clusters_of(b)
+    if list.len(x) != list.len(y)
+        return None
+    var d = 0
+    for i in 0..list.len(x)
+        if x[i] != y[i]
+            d = d + 1
+    Some(d)
 
 // The length of the longest common subsequence, in clusters.
 pub fn lcs_length(a: Str, b: Str) -> Int []
-    todo("fuzzy-nv.fuzzydist.lcs_length")
+    lcs_of(clusters_of(a), clusters_of(b))
 
-// Indel distance: insertions and deletions only, no substitutions.
-// The metric underneath `ratio`.
+// Indel distance: insertions and deletions only.  It is the sum of the
+// two lengths less twice the longest common subsequence, and the metric
+// `ratio` is built on.
 pub fn indel(a: Str, b: Str) -> Int []
-    todo("fuzzy-nv.fuzzydist.indel")
+    let x = clusters_of(a)
+    let y = clusters_of(b)
+    list.len(x) + list.len(y) - 2 * lcs_of(x, y)
 
-// Jaro similarity, in `[0.0, 1.0]`. 1.0 is identical.
+// Jaro similarity, in `[0.0, 1.0]`, where 1.0 is identical and 0.0 is
+// nothing in common.  Two empty strings are identical.
 pub fn jaro(a: Str, b: Str) -> Float []
-    todo("fuzzy-nv.fuzzydist.jaro")
+    let x = clusters_of(a)
+    let y = clusters_of(b)
+    let n = list.len(x)
+    let m = list.len(y)
+    if n == 0 and m == 0
+        return 1.0
+    if n == 0 or m == 0
+        return 0.0
+    let longer = if n > m
+        n
+    else
+        m
+    let window = if longer / 2 - 1 > 0
+        longer / 2 - 1
+    else
+        0
+    var taken = list.zeros(m)
+    var matched_x: [Str] = []
+    for i in 0..n
+        let lo = if i - window > 0
+            i - window
+        else
+            0
+        let hi = if i + window + 1 < m
+            i + window + 1
+        else
+            m
+        for j in lo..hi
+            if taken[j] == 0 and x[i] == y[j]
+                taken[j] = 1
+                list.push(matched_x, x[i])
+                break
+    let found = list.len(matched_x)
+    if found == 0
+        return 0.0
+    var half_swaps = 0
+    var k = 0
+    for j in 0..m
+        if taken[j] == 1
+            if matched_x[k] != y[j]
+                half_swaps = half_swaps + 1
+            k = k + 1
+    let f = found as Float
+    let t = (half_swaps / 2) as Float
+    (f / n as Float + f / m as Float + (f - t) / f) / 3.0
 
 // Jaro-Winkler similarity, in `[0.0, 1.0]`: Jaro with a bonus for a
-// shared prefix, with Winkler's own constants — scaling factor 0.1 and
-// a prefix considered up to 4 clusters.
+// shared prefix, with Winkler's constants, a scaling factor of 0.1 and
+// a prefix of at most 4 clusters.
 //
 // ```novo
 // use fuzzydist
@@ -132,46 +260,122 @@ pub fn jaro(a: Str, b: Str) -> Float []
 // println(if s > 0.96 then "close" else "far")
 // ```
 pub fn jaro_winkler(a: Str, b: Str) -> Float []
-    todo("fuzzy-nv.fuzzydist.jaro_winkler")
+    jaro_winkler_with(a, b, 0.1, 4)
 
-// Jaro-Winkler with the two constants supplied — for a caller matching
-// a corpus where the prefix means more or less than it does in the
-// surnames Winkler tuned it on.
-pub fn jaro_winkler_with(a: Str, b: Str, scale: Float, max_prefix: Int) -> Float []
-    todo("fuzzy-nv.fuzzydist.jaro_winkler_with")
-
-// Indel similarity normalised to `[0.0, 1.0]`. rapidfuzz's `ratio`,
-// and `difflib.SequenceMatcher.ratio`'s answer for the same inputs.
-pub fn ratio(a: Str, b: Str) -> Float []
-    todo("fuzzy-nv.fuzzydist.ratio")
-
-// The best `ratio` between `needle` and any substring of `haystack` of
-// the needle's length. rapidfuzz's `partial_ratio`.
+// Jaro-Winkler similarity with the two constants supplied.
 //
-// The call for "is this short string in that long one, roughly" —
-// where `ratio` answers a low number simply because the lengths
-// differ.
+// The prefix bonus is `prefix * scale * (1 - jaro)`, applied only when
+// the Jaro similarity is above 0.7, which is Winkler's boost threshold.
+// A `scale` above 0.25 with a prefix of 4 can answer more than 1.0, so a
+// caller supplying one keeps `scale * max_prefix` at or below 1.
+pub fn jaro_winkler_with(a: Str, b: Str, scale: Float, max_prefix: Int) -> Float []
+    let j = jaro(a, b)
+    if j <= 0.7
+        return j
+    let x = clusters_of(a)
+    let y = clusters_of(b)
+    let shorter = if list.len(x) < list.len(y)
+        list.len(x)
+    else
+        list.len(y)
+    var prefix = 0
+    for k in 0..(if max_prefix < shorter then max_prefix else shorter)
+        if x[k] != y[k]
+            break
+        prefix = k + 1
+    j + prefix as Float * scale * (1.0 - j)
+
+// Indel similarity normalised to `[0.0, 1.0]`: one less the indel
+// distance over the two lengths together.  It is rapidfuzz's `ratio`
+// divided by 100.  Two empty strings answer 1.0.
+//
+// `difflib.SequenceMatcher.ratio` answers the same number when the
+// matching blocks it finds form a longest common subsequence, and a
+// smaller one when its heuristic finds fewer matches.
+pub fn ratio(a: Str, b: Str) -> Float []
+    let x = clusters_of(a)
+    let y = clusters_of(b)
+    ratio_of(x, y)
+
+// The best `ratio` between the shorter string and any run of the longer
+// one of the same number of clusters.  rapidfuzz's `partial_ratio`.
+//
+// The call for "is this short string in that long one, roughly", where
+// `ratio` answers a low number because the lengths differ.
 pub fn partial_ratio(needle: Str, haystack: Str) -> Float []
-    todo("fuzzy-nv.fuzzydist.partial_ratio")
+    let x = clusters_of(needle)
+    let y = clusters_of(haystack)
+    let swap = list.len(x) > list.len(y)
+    let short = if swap
+        y
+    else
+        x
+    let long = if swap
+        x
+    else
+        y
+    let k = list.len(short)
+    if k == 0
+        return if list.len(long) == 0 then 1.0 else 0.0
+    var best = 0.0
+    for start in 0..list.len(long) - k + 1
+        let r = ratio_of(short, long[start:start + k])
+        if r > best
+            best = r
+    best
 
 // `ratio` over both strings' whitespace-separated tokens, each
-// lower-cased and sorted. rapidfuzz's `token_sort_ratio`: what makes
-// `"Klaus Hagen"` and `"Hagen, Klaus"` compare as the same name.
+// lower-cased and sorted, then joined by one space.  rapidfuzz's
+// `token_sort_ratio`: `Klaus Hagen` and `Hagen Klaus` are the same name.
 pub fn token_sort_ratio(a: Str, b: Str) -> Float []
-    todo("fuzzy-nv.fuzzydist.token_sort_ratio")
+    ratio(str.join(sorted_tokens(a), " "), str.join(sorted_tokens(b), " "))
 
-// `ratio` over the set of tokens rather than the sequence.
-// rapidfuzz's `token_set_ratio`: what makes a name with a middle
-// initial compare as the same name as one without.
-pub fn token_set_ratio(a: Str, b: Str) -> Float []
-    todo("fuzzy-nv.fuzzydist.token_set_ratio")
-
-// The indices of every candidate within `max` edits of `needle`, best
-// first.
+// `ratio` over the sets of tokens.  rapidfuzz's `token_set_ratio`.
+// A string with no tokens answers 0.0.
 //
-// The whole did-you-mean, in one call, over the bounded distance. A
-// caller writing this loop itself is the caller who forgets the
-// bound.
+// The tokens both strings share are joined into one string, and each
+// string's remaining tokens are appended to it.  The answer is the best
+// of the three ratios between those strings, and 1.0 when one string's
+// tokens all occur in the other, so a name with a middle initial
+// matches the name without one.
+pub fn token_set_ratio(a: Str, b: Str) -> Float []
+    let ta = unique(sorted_tokens(a))
+    let tb = unique(sorted_tokens(b))
+    if list.len(ta) == 0 or list.len(tb) == 0
+        return 0.0
+    var shared: [Str] = []
+    var only_a: [Str] = []
+    var only_b: [Str] = []
+    for t in ta
+        if list.contains(tb, t)
+            list.push(shared, t)
+        else
+            list.push(only_a, t)
+    for t in tb
+        if not list.contains(ta, t)
+            list.push(only_b, t)
+    if list.len(shared) > 0 and (list.len(only_a) == 0 or list.len(only_b) == 0)
+        return 1.0
+    let base = str.join(shared, " ")
+    let with_a = joined(base, only_a)
+    let with_b = joined(base, only_b)
+    let r = ratio(with_a, with_b)
+    if list.len(shared) == 0
+        return r
+    let ra = ratio(base, with_a)
+    let rb = ratio(base, with_b)
+    let partial = if ra > rb
+        ra
+    else
+        rb
+    if partial > r
+        partial
+    else
+        r
+
+// The indices of every candidate within `max` Levenshtein edits of
+// `needle`, nearest first and in input order among equals, at most
+// `limit` of them.  A `limit` of 0 answers all of them.
 //
 // ```novo
 // use fuzzydist
@@ -180,13 +384,144 @@ pub fn token_set_ratio(a: Str, b: Str) -> Float []
 //     println(str.from_int(i))   // 0
 // ```
 pub fn nearest(needle: Str, candidates: [Str], max: Int, limit: Int) -> [Int] []
-    todo("fuzzy-nv.fuzzydist.nearest")
+    var found: [(Int, Int)] = []
+    for i in 0..list.len(candidates)
+        if let Some(d) = levenshtein_within(needle, candidates[i], max)
+            list.push(found, (d, i))
+    list.sort(found)
+    var out: [Int] = []
+    for f in found
+        if limit > 0 and list.len(out) >= limit
+            break
+        list.push(out, f.1)
+    out
 
-// How many grapheme clusters a string holds — the unit every distance
-// here is counted in.
-//
-// Published so a caller choosing a `max` chooses it in the same unit,
-// and so the difference from `str.len`, which counts bytes, is
-// visible rather than implied.
+// How many grapheme clusters a string holds, the unit every distance
+// here is counted in.  `str.len` counts bytes.
 pub fn cluster_count(s: Str) -> Int []
-    todo("fuzzy-nv.fuzzydist.cluster_count")
+    ugrapheme.count(s)
+
+// The clusters of `s`, each as its own string.
+fn clusters_of(s: Str) -> [Str]
+    ugrapheme.clusters(s) |> list.map(c => str.slice(s, c.start, c.end))
+
+// The optimal string alignment table, abandoned with `None` once two
+// consecutive rows lie wholly above `max`.
+fn osa_table(x: [Str], y: [Str], max: Int) -> ?Int
+    let n = list.len(x)
+    let m = list.len(y)
+    let w = m + 1
+    var d = list.zeros((n + 1) * w)
+    for j in 0..w
+        d[j] = j
+    var previous_min = 0
+    for i in 1..n + 1
+        d[i * w] = i
+        var row_min = i
+        for j in 1..w
+            let cost = if x[i - 1] == y[j - 1]
+                0
+            else
+                1
+            var v = min3(d[(i - 1) * w + j - 1] + cost, d[(i - 1) * w + j] + 1,
+                         d[i * w + j - 1] + 1)
+            if i > 1 and j > 1 and x[i - 1] == y[j - 2] and x[i - 2] == y[j - 1]
+                let t = d[(i - 2) * w + j - 2] + 1
+                v = if t < v
+                    t
+                else
+                    v
+            d[i * w + j] = v
+            row_min = if v < row_min
+                v
+            else
+                row_min
+        if row_min > max and previous_min > max
+            return None
+        previous_min = row_min
+    let result = d[n * w + m]
+    if result <= max
+        Some(result)
+    else
+        None
+
+fn lcs_of(x: [Str], y: [Str]) -> Int
+    var prev = list.zeros(list.len(y) + 1)
+    for i in 1..list.len(x) + 1
+        var cur = list.zeros(list.len(y) + 1)
+        for j in 1..list.len(y) + 1
+            if x[i - 1] == y[j - 1]
+                cur[j] = prev[j - 1] + 1
+            else
+                cur[j] = if prev[j] > cur[j - 1]
+                    prev[j]
+                else
+                    cur[j - 1]
+        prev = cur
+    prev[list.len(y)]
+
+fn ratio_of(x: [Str], y: [Str]) -> Float
+    let total = list.len(x) + list.len(y)
+    if total == 0
+        return 1.0
+    let distance = total - 2 * lcs_of(x, y)
+    1.0 - distance as Float / total as Float
+
+// The whitespace-separated tokens of `s`, lower-cased and sorted.
+fn sorted_tokens(s: Str) -> [Str]
+    var out: [Str] = []
+    for t in str.split(str.lower(s), " ")
+        let trimmed = str.trim(t)
+        if str.len(trimmed) > 0
+            list.push(out, trimmed)
+    list.sort(out)
+    out
+
+// A sorted list with its repeats removed.
+fn unique(sorted: [Str]) -> [Str]
+    var out: [Str] = []
+    for t in sorted
+        if list.len(out) == 0 or out[list.len(out) - 1] != t
+            list.push(out, t)
+    out
+
+// `base` followed by `rest`, joined by single spaces, with no leading
+// space when `base` is empty.  `rest` is never empty here: a shared
+// base with nothing left on one side has already answered 1.0.
+fn joined(base: Str, rest: [Str]) -> Str
+    let tail = str.join(rest, " ")
+    if str.len(base) == 0
+        tail
+    else
+        "${base} ${tail}"
+
+// The last row a cluster was seen in, or 0.
+fn last_row(texts: [Str], rows: [Int], t: Str) -> Int
+    for i in 0..list.len(texts)
+        if texts[i] == t
+            return rows[i]
+    0
+
+fn remember(var texts: [Str], var rows: [Int], t: Str, row: Int)
+    for i in 0..list.len(texts)
+        if texts[i] == t
+            rows[i] = row
+            return
+    list.push(texts, t)
+    list.push(rows, row)
+
+fn min3(a: Int, b: Int, c: Int) -> Int
+    let ab = if a < b
+        a
+    else
+        b
+    if ab < c
+        ab
+    else
+        c
+
+fn abs(v: Int) -> Int
+    if v < 0
+        0 - v
+    else
+        v

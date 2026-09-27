@@ -1,18 +1,15 @@
-// fuzzydist_tests.nv — the classic distances, and the two things
-// libraries usually get wrong about them.
+// fuzzydist_tests.nv — the classic distances on their published
+// examples, and the two things libraries usually get wrong about them.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: fuzzy-nv.<module>.<fn>`.
+// The vectors are the published ones: `kitten` and `sitting` is
+// Levenshtein's own example, `MARTHA` and `MARHTA` is Winkler's, and
+// `ca` and `abc` is the pair that separates the two Damerau distances.
+// rapidfuzz's documented values back the ratios.  The generated
+// comparison with an independent implementation is
+// `fuzzydist_vectors_tests.nv`.
 //
-// THE VECTORS ARE THE PUBLISHED ONES: `kitten`/`sitting` is
-// Levenshtein's own example, `MARTHA`/`MARHTA` is Winkler's, and
-// `ca`/`abc` is the pair that separates the two Damerau distances —
-// the pair most libraries answer wrongly under one of the two names.
-// rapidfuzz's own test values back the ratios.
-//
-// THE TWO ASSERTIONS THIS SUITE EXISTS FOR: the bounded form answers
-// None rather than a number when the distance exceeds the bound, and
-// every distance is counted in grapheme clusters rather than bytes.
+// The bounded forms answer `None` rather than a number past the bound,
+// and every distance is counted in grapheme clusters rather than bytes.
 
 use std.test
 use std.list
@@ -39,7 +36,7 @@ fn test_the_bounded_form_stops_rather_than_finishing() [io]
         Some(d) => test.assert(d == 1)
         None    => test.assert(false)
 
-    test.case("past it, None — not a clamped number a caller would compare")
+    test.case("past it, None rather than a clamped number a caller would compare")
     match fuzzydist.levenshtein_within("kitten", "sitting", 2)
         Some(_) => test.assert(false)
         None    => test.assert(true)
@@ -56,7 +53,7 @@ fn test_the_bounded_form_stops_rather_than_finishing() [io]
 
 @test
 fn test_the_two_damerau_distances_are_different_and_both_are_named() [io]
-    test.case("osa of ca to abc is 3 — it may not edit a substring twice")
+    test.case("osa of ca to abc is 3, since it may not edit a substring twice")
     test.assert(fuzzydist.osa("ca", "abc") == 3)
 
     test.case("unrestricted damerau of the same pair is 2")
@@ -74,7 +71,7 @@ fn test_hamming_refuses_unequal_lengths_rather_than_inventing_an_answer() [io]
     test.case("equal lengths give the count of differing clusters")
     test.assert(fuzzydist.hamming("karolin", "kathrin") == Some(3))
 
-    test.case("unequal lengths give None — Hamming is not defined for them")
+    test.case("unequal lengths give None, since Hamming is not defined for them")
     test.assert(fuzzydist.hamming("abc", "ab") == None)
 
 @test
@@ -133,7 +130,7 @@ fn test_a_did_you_mean_is_one_call_over_the_bounded_distance() [io]
     test.assert(list.len(two) >= 1)
     test.assert(two[0] == 2)
 
-    test.case("nothing close answers nothing — rather than the least bad guess")
+    test.case("nothing close answers nothing rather than the least bad guess")
     test.assert(list.len(fuzzydist.nearest("xyzzy", commands, 2, 3)) == 0)
 
 @test
@@ -150,3 +147,84 @@ fn test_the_unit_is_a_grapheme_cluster_and_not_a_byte() [io]
 
     test.case("and a weighted distance charges the cost the caller named")
     test.assert(fuzzydist.levenshtein_weighted("ab", "a", 1, 5, 1) == 5)
+
+@test
+fn test_the_edges_of_every_distance() [io]
+    test.case("a bound below zero, or below the length difference, answers None at once")
+    test.assert(fuzzydist.levenshtein_within("a", "a", 0 - 1) == None)
+    test.assert(fuzzydist.levenshtein_within("a", "abcd", 2) == None)
+    test.assert(fuzzydist.osa_within("a", "a", 0 - 1) == None)
+    test.assert(fuzzydist.osa_within("a", "abcd", 2) == None)
+
+    test.case("the bounded walk stops at a row with nothing inside the bound")
+    test.assert(fuzzydist.levenshtein_within("aaaa", "bbbb", 1) == None)
+    test.assert(fuzzydist.osa_within("aaaa", "bbbb", 1) == None)
+    test.assert(fuzzydist.osa_within("abcdef", "abcxyf", 1) == None)
+
+    test.case("empty strings")
+    test.assert(fuzzydist.levenshtein("", "") == 0)
+    test.assert(fuzzydist.damerau("", "ab") == 2)
+    test.assert(fuzzydist.hamming("", "") == Some(0))
+    test.assert(fuzzydist.jaro("", "") > 0.999)
+    test.assert(fuzzydist.jaro("", "a") < 0.001)
+    test.assert(fuzzydist.ratio("", "") > 0.999)
+
+    test.case("the Winkler bonus is not applied at or below a Jaro of 0.7")
+    // Jaro is 0.6 here, and the two share a prefix of two.
+    test.assert(fuzzydist.jaro_winkler("abxyz", "abqrs") == fuzzydist.jaro("abxyz", "abqrs"))
+
+    test.case("the unrestricted distance lets a transposed pair be edited again")
+    test.assert(fuzzydist.damerau("abc", "ca") == 2)
+    test.assert(fuzzydist.osa("abc", "ca") == 3)
+    test.assert(fuzzydist.damerau("a cat", "an act") == 2)
+
+@test
+fn test_the_ratios_at_their_edges() [io]
+    test.case("partial_ratio takes either argument as the shorter")
+    test.assert(fuzzydist.partial_ratio("this is a test string", "test") > 0.99)
+
+    test.case("an empty needle is a whole match of an empty haystack and no match of another")
+    test.assert(fuzzydist.partial_ratio("", "") > 0.999)
+    test.assert(fuzzydist.partial_ratio("", "abc") < 0.001)
+
+    test.case("token_sort_ratio lower-cases and ignores repeated spaces")
+    test.assert(fuzzydist.token_sort_ratio("  NEW  york", "york new") > 0.999)
+
+    test.case("token_set_ratio of strings with no tokens is 0")
+    test.assert(fuzzydist.token_set_ratio("", "abc") < 0.001)
+
+    test.case("with nothing shared it is the ratio of the sorted tokens")
+    test.assert(fuzzydist.token_set_ratio("abc", "xyz") == fuzzydist.ratio("abc", "xyz"))
+
+    test.case("with something shared and something extra on both sides, the best of three")
+    // The shared "new york" against "new york mets" is 32/42, the best of
+    // the three; the two full strings against each other are 22/29.
+    let r = fuzzydist.token_set_ratio("new york mets", "new york yankees")
+    test.assert(r > 0.7619 and r < 0.7620)
+
+    test.case("the two full strings can be the best of the three")
+    // "a xyz" against "a xyw" is 8/10, above "a" against either, 2/6.
+    let r3 = fuzzydist.token_set_ratio("a xyz", "a xyw")
+    test.assert(r3 > 0.7999 and r3 < 0.8001)
+
+    test.case("the second string's side can be the best of the three")
+    // "x y" against "x y z" is 6/8, above 6/11 and 8/13.
+    let r2 = fuzzydist.token_set_ratio("x y long", "x y z")
+    test.assert(r2 > 0.7499 and r2 < 0.7501)
+
+@test
+fn test_nearest_orders_and_limits() [io]
+    let names = ["cat", "hat", "cart", "dog", "at"]
+
+    test.case("nearest first, and in input order among equal distances")
+    let all = fuzzydist.nearest("cat", names, 1, 0)
+    test.assert(list.len(all) == 4)
+    test.assert(all[0] == 0)
+    test.assert(all[1] == 1)
+    test.assert(all[2] == 2)
+    test.assert(all[3] == 4)
+
+    test.case("the limit keeps the best")
+    let two = fuzzydist.nearest("cat", names, 1, 2)
+    test.assert(list.len(two) == 2)
+    test.assert(two[1] == 1)

@@ -1,129 +1,141 @@
-// fuzzyscore.nv — the bonus table, the two scorers, and why a score
-// and its positions are two calls.
+// fuzzyscore.nv — the bonus table, the two scorers, and a score and its
+// positions as two calls.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// A score says how well a candidate matches a pattern.  The positions
+// say which clusters matched, for highlighting.  A picker scores every
+// candidate on every keystroke and highlights the forty it shows, so
+// `match_at` answers a score and the byte range the match covered and
+// allocates nothing, and `positions_of` is a second call that allocates
+// a list.  fzf makes the same split: it scores in a mode that keeps no
+// positions and recomputes them for the visible rows.
 //
-// **SCORING AND HIGHLIGHTING ARE TWO CALLS, AND THAT IS THE DESIGN.**
-// A picker over a repository scores every path on every keystroke and
-// shows forty rows. `match_at` answers a score and the byte range the
-// match covered; `positions_of` answers where each matched cluster is,
-// and allocates a list to do it. Folding the second into the first
-// makes a hundred thousand allocations to paint forty lines, and that
-// is the difference between a picker that feels instant and one that
-// does not. fzf makes the same split — it scores with `FuzzyMatchV2`
-// in "no backtrace" mode and recomputes the positions for the visible
-// window — and it is the single most important thing to copy from it.
+// The score is fzf's `calculateScore` in `src/algo/algo.go`.  Every
+// matched cluster earns `match_score` and a bonus for where it lands.
+// The bonus of the first cluster of an atom counts twice.  Inside a run
+// of consecutive matches, a cluster earns the largest of its own bonus,
+// `consecutive`, and the bonus the run started with, and a cluster whose
+// own bonus is at least `boundary` and larger than the run's restarts
+// the run at its value.  Between two matches, the first unmatched
+// cluster costs `gap_start` and every further one `gap_extend`.  Nothing
+// before the first match or after the last is charged.
 //
-// THE BONUS TABLE IS A VALUE. Almost all of a fzf score is the bonus
-// for WHERE a match lands rather than that it landed: after a
-// separator, at a camel-case boundary, at the start of the basename,
-// consecutive with the last match. Different corpora want different
-// tables — a file picker weights the path separator, a symbol picker
-// weights camel case, a command-line completion weights the first
-// character — so `FuzzyBonus` is a struct a caller can replace, and
-// `fzf_bonus()` is the reference implementation's own numbers, by
-// name, so a port can be checked against it.
+// The bonus for a cluster depends on its first codepoint and on the
+// first codepoint of the cluster before it:
 //
-// EVERY POSITION IS ON A GRAPHEME-CLUSTER BOUNDARY. The matcher
-// advances with `ugrapheme.next_boundary`, so an offset it answers is
-// a boundary by construction. A UI that inverts the matched bytes
-// therefore never paints half of a combining sequence or the middle of
-// an emoji ZWJ run — which is what a byte-at-a-time matcher does, and
-// which is invisible in every ASCII test.
+//     a word character at the start or after whitespace    first
+//     a word character after `/`                           path
+//     a word character after any other non-word character  boundary
+//     an upper-case letter after a lower-case one          camel
+//     a digit after anything but a digit                   camel
+//     whitespace                                           first
+//     any other non-word character                         boundary
 //
-// TWO SCORERS AND THEY DISAGREE, ON PURPOSE. `FuzzyScorerV2` is fzf's
-// heuristic: one forward pass, linear in the candidate, and it can
-// answer a lower score than the best alignment would. `FuzzyScorerExact`
-// is the full Smith–Waterman-style dynamic program, quadratic, and
-// always finds the best alignment. A picker uses the first; a test
-// asserting "this is the best possible match" uses the second, and so
-// does a caller ranking a short list where the cost does not matter.
-// Naming both is the honest form: a package that shipped only the
-// heuristic could not be checked against the algorithm it approximates.
+// A word character is a letter or a digit.  `\` is a path separator
+// only through `bonus_at`, whose caller says whether the candidates are
+// Windows paths.  fzf's table gives its delimiters `, : ; |` the path
+// value and this one gives them `boundary`.  That is the only place the
+// two tables differ.
+//
+// There are two scorers.  `FuzzyScorerV2` is fzf's fast algorithm: a
+// forward scan finds where the first complete subsequence ends, a
+// backward scan from there finds the latest start, and the clusters in
+// between are matched from the left.  It is linear in the candidate and
+// can miss the best alignment.  `FuzzyScorerExact` searches every
+// alignment with a dynamic program over the needle's clusters, the
+// candidate's clusters and the length of the current run, and answers
+// the best score the model above can give.  It is never lower than the
+// fast one, which the tests assert.
+//
+// Every position is a grapheme-cluster boundary, because the matcher
+// advances with `ugrapheme.next_boundary`.  A cluster of the needle
+// matches a cluster of the candidate when both hold the same number of
+// codepoints and each pair is equal under the pattern's case policy.
 
+use std.str
+use std.list
 use ugrapheme
+use uclass
 use fuzzypat
 
 // Which alignment search to run.
 pub enum FuzzyScorer
-    // fzf v2's heuristic: one forward pass over the candidate, linear
-    // in its length, and not always the best alignment.
+    // fzf's forward and backward scan: linear in the candidate, and not
+    // always the best alignment.
     FuzzyScorerV2
-    // The full dynamic program. Quadratic, always optimal.
+    // The full dynamic program.  Always the best alignment.
     FuzzyScorerExact
 
-// The score table. Every field is added to the running score when its
-// condition holds at a matched cluster.
+// The score table.  Each bonus field is added when its condition holds
+// at a matched cluster, as the module comment lists.
 pub struct FuzzyBonus
     // Every matched cluster scores this much before any bonus.
     match_score: Int
-    // A match immediately after the previous one.
+    // The least bonus a cluster inside a run of consecutive matches
+    // earns.
     consecutive: Int
-    // A match after a separator — space, `-`, `_`, `.`, `,`, `:`, `;`.
+    // A word character after a non-word one, and a matched non-word
+    // character.
     boundary: Int
-    // A match at an upper-case cluster whose predecessor is
-    // lower-case. Decided with `uclass`, not with an ASCII range.
+    // An upper-case letter after a lower-case one, or a digit after a
+    // non-digit.  Decided with Unicode's case properties.
     camel: Int
-    // A match after a path separator. Separate from `boundary`
-    // because a file picker wants it much larger: the thing a person
-    // means by typing `mod` is almost always a path component.
+    // A word character after a path separator.
     path: Int
-    // A match at offset 0 of the candidate.
+    // A word character at the start of the candidate or after
+    // whitespace.  fzf treats the start of the text as whitespace.
     first: Int
-    // Charged once when a run of unmatched clusters begins.
+    // Charged once when a run of unmatched clusters begins.  Negative.
     gap_start: Int
-    // Charged for each further unmatched cluster in that run. Both
-    // are NEGATIVE numbers in the reference table, and they are two
-    // fields because one long gap should cost less than several short
-    // ones — that is what makes a match inside one word beat a match
-    // scattered across three.
+    // Charged for each further unmatched cluster in that run.  Negative,
+    // and smaller in size than `gap_start`, so one long gap costs less
+    // than several short ones.
     gap_extend: Int
 
 // A match, without its positions.
-//
-// The value a ranking pass produces, one per candidate. It is three
-// integers: a caller ranking a hundred thousand candidates holds a
-// hundred thousand of these and allocates nothing else.
 pub struct FuzzyMatch
-    // Higher is better. Comparable only between matches of the SAME
-    // pattern against the same bonus table, which is why nothing here
-    // normalises it to 0..1 — a normalised score would look
-    // comparable across patterns and would not be.
+    // Higher is better.  Comparable only between matches of the same
+    // pattern under the same table.
     score: Int
     // The byte offset of the first matched cluster, and one past the
-    // last. A caller that wants to show a fragment of a long path uses
-    // this to pick the window, without asking for positions at all.
+    // end of the last.  Both are 0 for a pattern that matched without
+    // scoring: an empty one, or one whose atoms are all negated.
     start: Int
     end: Int
 
-// fzf's own table, by name, so a port can be checked against the
-// reference implementation rather than tuned until it feels right.
+// fzf's own table: `scoreMatch` 16, `bonusConsecutive` 4,
+// `bonusBoundary` 8, `bonusCamel123` 7, `bonusBoundaryDelimiter` 9 for
+// the path separator, `bonusBoundaryWhite` 10 for the start, and gaps of
+// -3 and -1.
 //
 // ```novo
 // use fuzzyscore
 //
 // let b = fuzzyscore.fzf_bonus()
-// println(str.from_int(b.consecutive))
+// println(str.from_int(b.consecutive))   // 4
 // ```
 pub fn fzf_bonus() -> FuzzyBonus []
-    todo("fuzzy-nv.fuzzyscore.fzf_bonus")
+    FuzzyBonus { match_score: 16, consecutive: 4, boundary: 8, camel: 7, path: 9,
+                 first: 10, gap_start: 0 - 3, gap_extend: 0 - 1 }
 
-// The same table with the path bonus raised and camel case lowered —
-// the weighting a file picker wants, where a person typing `mod` means
-// a directory called `models` and not `commodity`.
+// fzf's table with the path bonus raised to 12 and camel case lowered to
+// 5, for a file picker, where a person typing `mod` means a directory
+// called `models`.
 pub fn path_bonus() -> FuzzyBonus []
-    todo("fuzzy-nv.fuzzyscore.path_bonus")
+    FuzzyBonus { match_score: 16, consecutive: 4, boundary: 8, camel: 5, path: 12,
+                 first: 10, gap_start: 0 - 3, gap_extend: 0 - 1 }
 
-// The same table with camel case raised — what a symbol picker wants,
-// where `ftn` should find `fromTypeName`.
+// fzf's table with camel case raised to 10 and the path bonus lowered to
+// 8, for a symbol picker, where `ftn` should find `fromTypeName`.
 pub fn symbol_bonus() -> FuzzyBonus []
-    todo("fuzzy-nv.fuzzyscore.symbol_bonus")
+    FuzzyBonus { match_score: 16, consecutive: 4, boundary: 8, camel: 10, path: 8,
+                 first: 10, gap_start: 0 - 3, gap_extend: 0 - 1 }
 
 // Score one candidate against one compiled pattern.
 //
-// `None` when the candidate does not satisfy the pattern at all —
-// including when a negated atom matched — so a caller filters and
-// scores in one pass.
+// `None` when the candidate does not satisfy the pattern, including when
+// a negated atom matched.  The score is the sum over the terms of the
+// best-scoring atom that matched in each, and a term satisfied only by a
+// negated atom adds nothing.  With `FuzzyScorerV2` nothing is allocated.
 //
 // ```novo
 // use fuzzypat
@@ -136,25 +148,31 @@ pub fn symbol_bonus() -> FuzzyBonus []
 // ```
 pub fn match_at(p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus,
                 scorer: FuzzyScorer) -> ?FuzzyMatch []
-    todo("fuzzy-nv.fuzzyscore.match_at")
+    var none: [Int] = []
+    match_pattern(p, candidate, bonus, scorer, false, none)
 
 // Whether a candidate satisfies the pattern, with no score computed.
 //
-// The call an `N of M` footer makes over the whole corpus, and the one
-// a pure-filter pattern (`!test !vendor`) makes for everything: there
-// is no alignment to search for, so the answer is a scan.
+// A fuzzy atom is a forward scan and a literal one a search, so this is
+// the cheapest question to ask of a whole corpus.
 pub fn matches(p: fuzzypat.FuzzyPattern, candidate: Str) -> Bool []
-    todo("fuzzy-nv.fuzzyscore.matches")
+    for t in p.terms
+        var satisfied = false
+        for a in t.atoms
+            if atom_holds(a, candidate, p.effective_case) != a.negated
+                satisfied = true
+                break
+        if not satisfied
+            return false
+    true
 
-// The byte offsets of every matched cluster, for highlighting.
+// The byte offsets of every matched cluster, ascending, for
+// highlighting.
 //
-// THIS ALLOCATES, and it is a separate call for that reason: it is
-// made for the rows a person can see and not for the corpus. Every
-// offset is a grapheme-cluster boundary, so inverting the bytes from
-// one offset to the next boundary paints exactly one character.
-//
-// An empty list when the candidate does not match, and for a pattern
-// whose atoms are all negated — a filter highlights nothing.
+// This allocates, and it is a separate call for that reason.  Every
+// offset is a grapheme-cluster boundary.  The list is empty when the
+// candidate does not match and for a pattern whose atoms are all
+// negated.
 //
 // ```novo
 // use fuzzypat
@@ -162,70 +180,501 @@ pub fn matches(p: fuzzypat.FuzzyPattern, candidate: Str) -> Bool []
 //
 // let p = fuzzypat.literal("fz", FuzzyCaseSmart)
 // for at in fuzzyscore.positions_of(p, "fuzzy.nv", fuzzyscore.fzf_bonus(), FuzzyScorerV2)
-//     println(str.from_int(at))
+//     println(str.from_int(at))   // 0, then 2
 // ```
 pub fn positions_of(p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus,
                     scorer: FuzzyScorer) -> [Int] []
-    todo("fuzzy-nv.fuzzyscore.positions_of")
+    var out: [Int] = []
+    positions_into(out, p, candidate, bonus, scorer)
 
-// The same offsets, appended to a caller's buffer, for a picker that
-// repaints its window on every keystroke and would rather keep one
-// list alive than allocate forty.
-pub fn positions_into(out: [Int], p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus,
+// The same offsets, appended to the caller's list, which is answered.
+// Nothing is appended when the candidate does not match.
+pub fn positions_into(var out: [Int], p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus,
                       scorer: FuzzyScorer) -> [Int] []
-    todo("fuzzy-nv.fuzzyscore.positions_into")
+    var found: [Int] = []
+    if match_pattern(p, candidate, bonus, scorer, true, found) != None
+        list.sort(found)
+        var last = 0 - 1
+        for at in found
+            if at != last
+                list.push(out, at)
+            last = at
+    out
 
-// Byte offsets turned into cluster INDICES, counted from the start of
-// the candidate.
+// Byte offsets turned into cluster indices, counted from 0 at the start
+// of the candidate.  An offset inside a cluster answers that cluster's
+// index.
 //
-// What a renderer that lays out by cell rather than by byte needs.
-// Separate because computing it means walking the candidate from the
-// start, which a caller that highlights by byte offset should not pay
-// for.
+// What a renderer that lays out by cell rather than by byte needs.  It
+// walks the candidate from the start, which a caller that highlights by
+// byte offset does not need to pay for.
 pub fn to_cluster_indices(candidate: Str, positions: [Int]) -> [Int] []
-    todo("fuzzy-nv.fuzzyscore.to_cluster_indices")
+    let starts = ugrapheme.clusters(candidate) |> list.map(c => c.start)
+    positions |> list.map(pos => list.count(starts, s => s <= pos) - 1)
 
-// Score one atom against a candidate, for a caller assembling its own
-// pattern semantics — a picker that wants fzf's fuzzy atom and none of
-// its syntax, or one adding an atom kind of its own.
+// Score one atom against a candidate under a case policy.
+//
+// The atom's `negated` flag is not read: the answer is how the atom's
+// text matches, and deciding what a negation means is the caller's.
 pub fn match_atom(a: fuzzypat.FuzzyAtom, candidate: Str, case: fuzzypat.FuzzyCase,
                   bonus: FuzzyBonus, scorer: FuzzyScorer) -> ?FuzzyMatch []
-    todo("fuzzy-nv.fuzzyscore.match_atom")
+    var none: [Int] = []
+    score_atom(a, candidate, case, bonus, scorer, false, none)
 
-// The bonus a match at `at` would earn in `candidate`, given the
-// cluster before it.
+// The bonus a match at byte offset `at` would earn in `candidate`, from
+// the cluster at `at` and the one before it, as the module comment
+// lists.
 //
-// Published because it is the whole model, and a caller tuning a table
-// needs to see what a candidate scores position by position rather
-// than only what it scores in total.
+// The whole model, position by position, for a caller tuning a table.
 pub fn bonus_at(candidate: Str, at: Int, bonus: FuzzyBonus, windows: Bool) -> Int []
-    todo("fuzzy-nv.fuzzyscore.bonus_at")
+    let current = fuzzypat.codepoint_at(candidate, at)
+    if at <= 0
+        return bonus_between(0 - 1, current, bonus, windows)
+    let before = ugrapheme.prev_boundary(candidate, at)
+    bonus_between(fuzzypat.codepoint_at(candidate, before), current, bonus, windows)
 
-// The highest score this pattern could give any candidate, under this
-// table.
+// A score no candidate can exceed under this pattern and table: every
+// cluster of every positive atom matched with the table's largest
+// bonus.
 //
-// Not a normalisation — see `FuzzyMatch.score` — but the number a UI
-// needs to draw a bar, and the one a caller needs to set a cutoff that
-// means the same thing for a two-letter query and a ten-letter one.
+// Not a normalisation, since a score is comparable only within one
+// pattern, but the ceiling a bar is drawn against and a cutoff can be
+// set from.
 pub fn max_score(p: fuzzypat.FuzzyPattern, bonus: FuzzyBonus) -> Int []
-    todo("fuzzy-nv.fuzzyscore.max_score")
+    var top = 0
+    for b in [bonus.first, bonus.path, bonus.boundary, bonus.camel, bonus.consecutive]
+        if b > top
+            top = b
+    var total = 0
+    for t in p.terms
+        var best = 0
+        for a in t.atoms
+            if not a.negated
+                let k = ugrapheme.count(a.needle)
+                let ceiling = k * bonus.match_score + (k + 1) * top
+                if ceiling > best
+                    best = ceiling
+        total = total + best
+    total
 
-// The next grapheme-cluster boundary at or after `at`, as
-// `ugrapheme.next_boundary` defines it.
-//
-// Published because every offset this module answers is one, and a
-// caller slicing a candidate around a match needs the same function
-// rather than a guess at what this package did.
+// The first grapheme-cluster boundary at or after `at`: `at` itself
+// when it is one, the end of the string past the end, and 0 before the
+// start.
 pub fn cluster_boundary(candidate: Str, at: Int) -> Int []
-    todo("fuzzy-nv.fuzzyscore.cluster_boundary")
+    if at <= 0
+        return 0
+    if at >= str.len(candidate)
+        return str.len(candidate)
+    if ugrapheme.is_boundary(candidate, at)
+        return at
+    ugrapheme.next_boundary(candidate, at)
 
-// The matched clusters themselves, as unicode-nv's own segments.
+// The clusters that hold the given byte offsets, as unicode-nv's own
+// ranges, one per offset.
 //
-// The type crosses the package boundary on purpose. A position this
-// module answers IS a cluster boundary, and the honest way for a
-// signature to say so is to hand back the segments the standard
-// defines rather than a pair of integers this package named itself. A
-// renderer inverting the match walks these; one that wants only the
+// A renderer inverting the match walks these.  One that wants only the
 // offsets uses `positions_of` and pays for no second walk.
 pub fn matched_clusters(candidate: Str, positions: [Int]) -> [ugrapheme.UniCluster] []
-    todo("fuzzy-nv.fuzzyscore.matched_clusters")
+    var out: [ugrapheme.UniCluster] = []
+    for at in positions
+        let inside = not ugrapheme.is_boundary(candidate, at)
+        let start = if inside
+            ugrapheme.prev_boundary(candidate, at)
+        else
+            at
+        list.push(out, UniCluster { start: start, end: ugrapheme.next_boundary(candidate, start) })
+    out
+
+// The bonus of a cluster whose first codepoint is `current`, after one
+// whose first codepoint is `before`, which is -1 at the start.
+fn bonus_between(before: Int, current: Int, b: FuzzyBonus, windows: Bool) -> Int
+    if uclass.is_alphanumeric(current)
+        if before < 0 or uclass.is_whitespace(before)
+            return b.first
+        if fuzzypat.is_path_separator(before, windows)
+            return b.path
+        if not uclass.is_alphanumeric(before)
+            return b.boundary
+        if uclass.is_lowercase(before) and uclass.is_uppercase(current)
+            return b.camel
+        if uclass.is_digit(current) and not uclass.is_digit(before)
+            return b.camel
+        return 0
+    if uclass.is_whitespace(current)
+        return b.first
+    b.boundary
+
+// Whether the needle's cluster [ns, ne) and the candidate's [cs, ce)
+// hold the same codepoints under the case policy.  Every step moves `i`
+// forward by at least one byte, so the walk ends within the cluster.
+fn cluster_eq(needle: Str, ns: Int, ne: Int, cand: Str, cs: Int, ce: Int,
+              case: fuzzypat.FuzzyCase) -> Bool
+    var i = ns
+    var j = cs
+    for _ in ns..ne
+        if i >= ne
+            break
+        if j >= ce
+            return false
+        if not fuzzypat.chars_equal(fuzzypat.codepoint_at(needle, i),
+                                    fuzzypat.codepoint_at(cand, j), case)
+            return false
+        i = i + fuzzypat.codepoint_len(needle, i)
+        j = j + fuzzypat.codepoint_len(cand, j)
+    j >= ce
+
+// The whole pattern, with the positions of the chosen atoms appended to
+// `out` when `want` is set.
+fn match_pattern(p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus, scorer: FuzzyScorer,
+                 want: Bool, var out: [Int]) -> ?FuzzyMatch
+    var total = 0
+    var start = str.len(candidate)
+    var end = 0
+    var scored = false
+    for t in p.terms
+        var satisfied = false
+        var best: ?FuzzyMatch = None
+        var best_at: [Int] = []
+        for a in t.atoms
+            if a.negated
+                if not atom_holds(a, candidate, p.effective_case)
+                    satisfied = true
+                continue
+            var at: [Int] = []
+            if let Some(m) = score_atom(a, candidate, p.effective_case, bonus, scorer, want, at)
+                let better = match best
+                    None    => true
+                    Some(b) => m.score > b.score
+                if better
+                    best = Some(m)
+                    best_at = at
+        if let Some(m) = best
+            total = total + m.score
+            start = if m.start < start
+                m.start
+            else
+                start
+            end = if m.end > end
+                m.end
+            else
+                end
+            scored = true
+            list.append(out, best_at)
+        else if not satisfied
+            return None
+    if not scored
+        return Some(FuzzyMatch { score: 0, start: 0, end: 0 })
+    Some(FuzzyMatch { score: total, start: start, end: end })
+
+// Whether an atom's text occurs in the candidate as its kind demands,
+// with no alignment scored.
+fn atom_holds(a: fuzzypat.FuzzyAtom, cand: Str, case: fuzzypat.FuzzyCase) -> Bool
+    let nb = boundaries(a.needle)
+    match a.kind
+        FuzzyAtomFuzzy => subsequence_end(a.needle, nb, cand, case) >= 0
+        FuzzyAtomExact => literal_start(a.needle, nb, cand, case) >= 0
+        _              => anchored_start(a, nb, cand, case) >= 0
+
+// One atom scored, with its positions appended to `out` when `want` is
+// set.
+fn score_atom(a: fuzzypat.FuzzyAtom, cand: Str, case: fuzzypat.FuzzyCase, b: FuzzyBonus,
+              scorer: FuzzyScorer, want: Bool, var out: [Int]) -> ?FuzzyMatch
+    if str.len(a.needle) == 0
+        return Some(FuzzyMatch { score: 0, start: 0, end: 0 })
+    let nb = boundaries(a.needle)
+    match a.kind
+        FuzzyAtomFuzzy =>
+            match scorer
+                FuzzyScorerV2    => fuzzy_fast(a.needle, nb, cand, case, b, want, out)
+                FuzzyScorerExact => fuzzy_exact(a.needle, nb, cand, case, b, want, out)
+        FuzzyAtomExact =>
+            literal_best(a.needle, nb, cand, case, b, want, out)
+        _              =>
+            let s = anchored_start(a, nb, cand, case)
+            if s < 0
+                return None
+            let e = literal_end(a.needle, nb, cand, s, case)
+            Some(FuzzyMatch { score: score_greedy(a.needle, nb, cand, s, e, case, b, want, out),
+                              start: s, end: e })
+
+// The offset one past the cluster that completes the first subsequence
+// match of `needle` in `cand`, or -1.  `nb` is the needle's cluster
+// boundaries.  Every step moves `at` forward by a cluster, so the walk
+// ends within the candidate's length.
+fn subsequence_end(needle: Str, nb: [Int], cand: Str, case: fuzzypat.FuzzyCase) -> Int
+    let clen = str.len(cand)
+    let k = list.len(nb) - 1
+    var i = 0
+    var at = 0
+    for _ in 0..clen
+        if at >= clen
+            break
+        let next = ugrapheme.next_boundary(cand, at)
+        if cluster_eq(needle, nb[i], nb[i + 1], cand, at, next, case)
+            i = i + 1
+            if i >= k
+                return next
+        at = next
+    0 - 1
+
+// fzf's fast algorithm: the forward scan, the backward scan, and the
+// greedy score of what lies between.  The backward scan matches the
+// needle's clusters from the last, each at the first candidate cluster
+// before the previous one that holds it, which the forward scan has
+// shown exists.
+fn fuzzy_fast(needle: Str, nb: [Int], cand: Str, case: fuzzypat.FuzzyCase, b: FuzzyBonus,
+              want: Bool, var out: [Int]) -> ?FuzzyMatch
+    let end = subsequence_end(needle, nb, cand, case)
+    if end < 0
+        return None
+    var at = end
+    for i in list.rev(list.range(0, list.len(nb) - 1))
+        for _ in 0..at
+            let before = ugrapheme.prev_boundary(cand, at)
+            let held = cluster_eq(needle, nb[i], nb[i + 1], cand, before, at, case)
+            at = before
+            if held
+                break
+    Some(FuzzyMatch { score: score_greedy(needle, nb, cand, at, end, case, b, want, out),
+                      start: at, end: end })
+
+// fzf's `calculateScore`: match the needle's clusters from the left
+// inside [start, end), and score that alignment as the module comment
+// describes.
+fn score_greedy(needle: Str, nb: [Int], cand: Str, start: Int, end: Int, case: fuzzypat.FuzzyCase,
+                b: FuzzyBonus, want: Bool, var out: [Int]) -> Int
+    let k = list.len(nb) - 1
+    var i = 0
+    var score = 0
+    var in_gap = false
+    var run = 0
+    var run_bonus = 0
+    var before = 0 - 1
+    if start > 0
+        before = fuzzypat.codepoint_at(cand, ugrapheme.prev_boundary(cand, start))
+    var at = start
+    for _ in start..end
+        if at >= end
+            break
+        let next = ugrapheme.next_boundary(cand, at)
+        let current = fuzzypat.codepoint_at(cand, at)
+        if i < k and cluster_eq(needle, nb[i], nb[i + 1], cand, at, next, case)
+            if want
+                list.push(out, at)
+            var bonus = bonus_between(before, current, b, false)
+            if run == 0
+                run_bonus = bonus
+            else
+                if bonus >= b.boundary and bonus > run_bonus
+                    run_bonus = bonus
+                bonus = max3(bonus, run_bonus, b.consecutive)
+            score = score + b.match_score + (if i == 0 then bonus * 2 else bonus)
+            in_gap = false
+            run = run + 1
+            i = i + 1
+        else
+            score = score + (if in_gap then b.gap_extend else b.gap_start)
+            in_gap = true
+            run = 0
+            run_bonus = 0
+        before = current
+        at = next
+    score
+
+fn max3(a: Int, b: Int, c: Int) -> Int
+    let ab = if a > b
+        a
+    else
+        b
+    if ab > c
+        ab
+    else
+        c
+
+// The offset one past the literal match of `needle` starting at `s`, or
+// -1 when the needle's clusters do not follow one another from there.
+fn literal_end(needle: Str, nb: [Int], cand: Str, s: Int, case: fuzzypat.FuzzyCase) -> Int
+    var at = s
+    for i in 0..list.len(nb) - 1
+        if at >= str.len(cand)
+            return 0 - 1
+        let next = ugrapheme.next_boundary(cand, at)
+        if not cluster_eq(needle, nb[i], nb[i + 1], cand, at, next, case)
+            return 0 - 1
+        at = next
+    at
+
+// The first cluster boundary where the needle occurs literally, or -1.
+fn literal_start(needle: Str, nb: [Int], cand: Str, case: fuzzypat.FuzzyCase) -> Int
+    let clen = str.len(cand)
+    var at = 0
+    for _ in 0..clen
+        if at >= clen
+            break
+        if literal_end(needle, nb, cand, at, case) >= 0
+            return at
+        at = ugrapheme.next_boundary(cand, at)
+    0 - 1
+
+// A literal atom's best-scoring occurrence.  fzf scores every
+// occurrence and keeps the best, so `'main` in `domain/main.nv`
+// highlights the path component rather than the middle of a word.
+fn literal_best(needle: Str, nb: [Int], cand: Str, case: fuzzypat.FuzzyCase, b: FuzzyBonus,
+                want: Bool, var out: [Int]) -> ?FuzzyMatch
+    var best: ?FuzzyMatch = None
+    var none: [Int] = []
+    let clen = str.len(cand)
+    var at = 0
+    for _ in 0..clen
+        if at >= clen
+            break
+        let e = literal_end(needle, nb, cand, at, case)
+        if e >= 0
+            let s = score_greedy(needle, nb, cand, at, e, case, b, false, none)
+            let better = match best
+                None    => true
+                Some(m) => s > m.score
+            if better
+                best = Some(FuzzyMatch { score: s, start: at, end: e })
+        at = ugrapheme.next_boundary(cand, at)
+    if want
+        if let Some(m) = best
+            let _ = score_greedy(needle, nb, cand, m.start, m.end, case, b, true, out)
+    best
+
+// Where a prefix, suffix or whole-candidate atom starts in `cand`, or
+// -1 when it does not hold.
+fn anchored_start(a: fuzzypat.FuzzyAtom, nb: [Int], cand: Str, case: fuzzypat.FuzzyCase) -> Int
+    let clen = str.len(cand)
+    match a.kind
+        FuzzyAtomPrefix => if literal_end(a.needle, nb, cand, 0, case) >= 0
+            0
+        else
+            0 - 1
+        FuzzyAtomEqual  => if literal_end(a.needle, nb, cand, 0, case) == clen
+            0
+        else
+            0 - 1
+        _               =>
+            var s = clen
+            for _ in 0..list.len(nb) - 1
+                s = ugrapheme.prev_boundary(cand, s)
+            if literal_end(a.needle, nb, cand, s, case) == clen
+                s
+            else
+                0 - 1
+
+// A value no reachable score comes near, for the cells of the dynamic
+// program no alignment reaches.
+const UNREACHED = 0 - 1000000000
+
+// The exact scorer.  `m[(i * n + j) * k + (run - 1)]` is the best score
+// of an alignment of the needle's first `i + 1` clusters whose cluster
+// `i` matches candidate cluster `j` at the end of a run of `run`
+// consecutive matches; `fb` beside it is the run's bonus, which the next
+// cluster of the run needs.  A run ending at cluster `i` is at most
+// `i + 1` long, so the third index runs to the needle's length `k`.
+// `from_j` and `from_run` record, for a cell whose run is 1, the cell of
+// the row before that the gap was opened from.
+fn fuzzy_exact(needle: Str, ns: [Int], cand: Str, case: fuzzypat.FuzzyCase, b: FuzzyBonus,
+               want: Bool, var out: [Int]) -> ?FuzzyMatch
+    if subsequence_end(needle, ns, cand, case) < 0
+        return None
+    let cs = boundaries(cand)
+    let k = list.len(ns) - 1
+    let n = list.len(cs) - 1
+    var bon: [Int] = []
+    var before = 0 - 1
+    for j in 0..n
+        let current = fuzzypat.codepoint_at(cand, cs[j])
+        list.push(bon, bonus_between(before, current, b, false))
+        before = current
+    var m = filled(UNREACHED, k * n * k)
+    var fb = list.zeros(k * n * k)
+    var from_j = list.zeros(k * n)
+    var from_run = list.zeros(k * n)
+    // The best score in the row before at each candidate cluster, over
+    // every run length, and the run length that reached it.
+    var prev_best = filled(UNREACHED, n)
+    var prev_run = list.zeros(n)
+    for i in 0..k
+        var row_best = filled(UNREACHED, n)
+        var row_run = list.zeros(n)
+        var gap = UNREACHED
+        var gap_j = 0
+        var gap_run = 0
+        for j in 0..n
+            if i > 0 and j >= 2 and prev_best[j - 2] > UNREACHED
+                let open = prev_best[j - 2] + b.gap_start
+                if gap == UNREACHED or open >= gap + b.gap_extend
+                    gap = open
+                    gap_j = j - 2
+                    gap_run = prev_run[j - 2]
+                else
+                    gap = gap + b.gap_extend
+            else if gap > UNREACHED
+                gap = gap + b.gap_extend
+            if not cluster_eq(needle, ns[i], ns[i + 1], cand, cs[j], cs[j + 1], case)
+                continue
+            let at = (i * n + j) * k
+            if i == 0
+                m[at] = b.match_score + bon[j] * 2
+                fb[at] = bon[j]
+            else if gap > UNREACHED
+                m[at] = gap + b.match_score + bon[j]
+                fb[at] = bon[j]
+                from_j[i * n + j] = gap_j
+                from_run[i * n + j] = gap_run
+            if i > 0 and j > 0
+                let from = ((i - 1) * n + j - 1) * k
+                for run in 2..i + 2
+                    let p = m[from + run - 2]
+                    if p > UNREACHED
+                        var rb = fb[from + run - 2]
+                        if bon[j] >= b.boundary and bon[j] > rb
+                            rb = bon[j]
+                        m[at + run - 1] = p + b.match_score + max3(bon[j], rb, b.consecutive)
+                        fb[at + run - 1] = rb
+            for run in 1..i + 2
+                if m[at + run - 1] > row_best[j]
+                    row_best[j] = m[at + run - 1]
+                    row_run[j] = run
+        prev_best = row_best
+        prev_run = row_run
+    var best = UNREACHED
+    var best_j = 0
+    var best_run = 1
+    for j in 0..n
+        if prev_best[j] > best
+            best = prev_best[j]
+            best_j = j
+            best_run = prev_run[j]
+    // Walk back from the best cell.  Inside a run the previous cluster
+    // is the diagonal neighbour; at the start of a run it is the cell
+    // the gap was opened from.
+    var j = best_j
+    var run = best_run
+    if want
+        list.push(out, cs[j])
+    for i in list.rev(list.range(1, k))
+        if run > 1
+            j = j - 1
+            run = run - 1
+        else
+            let cell = i * n + j
+            j = from_j[cell]
+            run = from_run[cell]
+        if want
+            list.push(out, cs[j])
+    Some(FuzzyMatch { score: best, start: cs[j], end: cs[best_j + 1] })
+
+// A list of `count` copies of `v`.
+fn filled(v: Int, count: Int) -> [Int]
+    var out: [Int] = []
+    for _ in 0..count
+        list.push(out, v)
+    out
+
+// The cluster boundaries of `s`, from 0 to its length inclusive.
+fn boundaries(s: Str) -> [Int]
+    list.concat([0], ugrapheme.clusters(s) |> list.map(c => c.end))

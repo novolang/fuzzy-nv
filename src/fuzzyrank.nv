@@ -1,56 +1,45 @@
-// fuzzyrank.nv — a candidate list, ordered, with the ties broken the
+// fuzzyrank.nv — a candidate list, ordered, with every tie broken the
 // same way every time.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// The order is total.  Two results compare by score, higher first, then
+// by the caller's chosen tiebreak, then by their index in the input,
+// lower first.  The index is unique, so no two different candidates
+// compare equal, and a picker that repaints on every keystroke never
+// swaps two rows of equal score between repaints.
 //
-// THE ORDER IS TOTAL, AND THAT IS A REQUIREMENT RATHER THAN A NICETY.
-// A picker repaints on every keystroke, and two candidates with the
-// same score that swap places between two repaints make the list
-// flicker under the cursor — a person presses Enter on the row they
-// were looking at and opens a different file. So the comparison is
-// defined down to the last step: score, then the caller's chosen
-// tiebreak, then the candidate's INDEX in the input, which is unique.
-// There is no arbitrary case left.
+// A ranking answers indices into the caller's own candidate list and
+// never copies a string.
 //
-// NOTHING IS COPIED. A ranking answers indices into the caller's own
-// candidate list, never the strings. The candidates may be a list a
-// producer is still appending to, a slice of a memory-mapped index, or
-// forty thousand paths a directory walk found; a ranker that returned
-// `[Str]` would double that.
-//
-// `limit` BOUNDS THE ANSWER, NOT THE WORK, AND THE README SAYS SO. A
-// caller asking for the top forty of a hundred thousand still scores a
-// hundred thousand candidates — there is no way to know which forty
-// win without scoring them — but it holds forty results rather than a
-// sorted hundred thousand. novim's own picker sorts the whole list and
-// then truncates; this keeps a bounded heap instead, which is the same
-// answer and a different amount of memory.
+// `limit` bounds the answer and not the work.  Every candidate is still
+// scored, since there is no way to know which forty of a hundred
+// thousand win without scoring them, but a limited ranking holds at most
+// `limit` results at a time: each new result is inserted into a sorted
+// list of that size and the last one falls off.
 
+use std.str
+use std.list
 use fuzzypat
 use fuzzyscore
 
-// What separates two candidates with the same score.
-//
-// fzf's `--tiebreak`, in fzf's own order of usefulness.
+// What separates two candidates with the same score.  fzf's
+// `--tiebreak`.
 pub enum FuzzyTie
-    // The shorter candidate wins. fzf's default, and the right one for
-    // paths: `src/io.nv` before `src/internal/io_helpers.nv`.
+    // The shorter candidate, in bytes, first.  fzf's default, and the
+    // right one for paths: `src/io.nv` before `src/internal/io_helpers.nv`.
     FuzzyTieLength
-    // The one whose match starts earlier wins.
+    // The one whose match starts earlier first.
     FuzzyTieBegin
-    // The one whose match ends earlier wins.
+    // The one whose match ends earlier first.
     FuzzyTieEnd
-    // Nothing — fall straight through to the input index, so equal
-    // scores come out in producer order. What a caller whose producer
-    // already sorted by recency wants.
+    // Nothing: equal scores come out in the input's order.
     FuzzyTieIndex
 
 // One result.
 pub struct FuzzyRanked
     // Index into the candidate list the caller passed in.
     index: Int
-    // The match that earned the place, so a caller can highlight from
-    // `start`/`end` without scoring again.
+    // The match that earned the place, so a caller can use `start` and
+    // `end` without scoring again.
     matched: fuzzyscore.FuzzyMatch
 
 // How a ranking runs.
@@ -58,12 +47,11 @@ pub struct FuzzyRankOptions
     bonus: fuzzyscore.FuzzyBonus
     scorer: fuzzyscore.FuzzyScorer
     tie: FuzzyTie
-    // At most this many results. Zero means all of them.
+    // At most this many results.  Zero means all of them.
     limit: Int
-    // Candidates scoring below this are dropped even though they
-    // matched. Zero keeps every match, which is fzf's behaviour; a
-    // command-line completion that would rather show nothing than show
-    // a bad guess sets it.
+    // Candidates scoring below this are dropped although they matched.
+    // Zero keeps every match of a pattern that scores, which is fzf's
+    // behaviour.
     min_score: Int
 
 // fzf's defaults: its own bonus table, the fast scorer, length as the
@@ -73,16 +61,20 @@ pub struct FuzzyRankOptions
 // use fuzzyrank
 //
 // let o = fuzzyrank.default_options()
-// println(str.from_int(o.limit))   // 0 — all of them
+// println(str.from_int(o.limit))   // 0, meaning all of them
 // ```
 pub fn default_options() -> FuzzyRankOptions []
-    todo("fuzzy-nv.fuzzyrank.default_options")
+    FuzzyRankOptions { bonus: fuzzyscore.fzf_bonus(), scorer: FuzzyScorerV2,
+                       tie: FuzzyTieLength, limit: 0, min_score: 0 }
 
-// A file picker's: the path bonus table, and the top `limit` results.
+// A file picker's options: the path bonus table and the top `limit`
+// results.
 pub fn picker_options(limit: Int) -> FuzzyRankOptions []
-    todo("fuzzy-nv.fuzzyrank.picker_options")
+    FuzzyRankOptions { bonus: fuzzyscore.path_bonus(), scorer: FuzzyScorerV2,
+                       tie: FuzzyTieLength, limit: limit, min_score: 0 }
 
-// Rank a candidate list.
+// Rank a candidate list: every candidate that matches and scores at
+// least `min_score`, best first, at most `limit` of them.
 //
 // ```novo
 // use fuzzypat
@@ -95,51 +87,152 @@ pub fn picker_options(limit: Int) -> FuzzyRankOptions []
 //     println(str.from_int(h.index))
 // ```
 pub fn rank(p: fuzzypat.FuzzyPattern, candidates: [Str], o: FuzzyRankOptions) -> [FuzzyRanked] []
-    todo("fuzzy-nv.fuzzyrank.rank")
+    var out: [FuzzyRanked] = []
+    rank_into(out, p, candidates, o)
 
-// Rank, appending to the caller's own result list — the shape a picker
-// that repaints on every keystroke wants, so the list outlives the
-// keystroke rather than the allocator seeing it again.
-pub fn rank_into(out: [FuzzyRanked], p: fuzzypat.FuzzyPattern, candidates: [Str],
-                 o: FuzzyRankOptions) -> [FuzzyRanked] []
-    todo("fuzzy-nv.fuzzyrank.rank_into")
+// Rank, appending the results to the caller's list, which is answered.
+// The results already in the list are left where they are.
+//
+// A pattern for which `order_is_input` holds scores every candidate 0,
+// and its results come out in the input's order whatever `tie` says,
+// which is fzf's rule for a query that cannot be sorted.
+pub fn rank_into(var out: [FuzzyRanked], p: fuzzypat.FuzzyPattern, candidates: [Str],
+                 options: FuzzyRankOptions) -> [FuzzyRanked] []
+    let o = if order_is_input(p)
+        input_order(options)
+    else
+        options
+    var kept: [FuzzyRanked] = []
+    for i in 0..list.len(candidates)
+        if let Some(m) = fuzzyscore.match_at(p, candidates[i], o.bonus, o.scorer)
+            if m.score >= o.min_score
+                keep(kept, FuzzyRanked { index: i, matched: m }, candidates, o)
+    list.append(out, finish(kept, candidates, o))
+    out
 
 // How many candidates match at all, ignoring `limit` and `min_score`.
 //
-// The denominator of an honest `40 of 1204` footer. A named call
-// because a caller cannot get it from a limited ranking — that is
-// exactly the number the limit threw away — and because it can be
-// answered with `fuzzyscore.matches`, which searches for no alignment
-// and costs a scan.
+// The denominator of a `40 of 1204` footer.  It uses
+// `fuzzyscore.matches`, which scores nothing.
 pub fn count_matches(p: fuzzypat.FuzzyPattern, candidates: [Str]) -> Int []
-    todo("fuzzy-nv.fuzzyrank.count_matches")
+    var n = 0
+    for c in candidates
+        if fuzzyscore.matches(p, c)
+            n = n + 1
+    n
 
-// Rank a list the caller has already scored — for a producer that
-// scores as results arrive and wants the ordering rule without
-// rescoring.
+// Order results the caller scored itself under the ordering rule,
+// applying `limit` and `min_score`.  The caller's list is left as it
+// was.
 pub fn order(hits: [FuzzyRanked], candidates: [Str], o: FuzzyRankOptions) -> [FuzzyRanked] []
-    todo("fuzzy-nv.fuzzyrank.order")
+    var kept: [FuzzyRanked] = []
+    for h in hits
+        if h.matched.score >= o.min_score
+            keep(kept, h, candidates, o)
+    finish(kept, candidates, o)
 
 // Compare two results under the ordering rule: negative when `a` comes
-// first, positive when `b` does, and NEVER zero for two different
-// indices.
+// first, positive when `b` does, and zero only when both carry the same
+// index.
 //
-// Published because a caller merging two ranked lists — results from
-// two producers, an index and a live walk — has to merge them under
-// the same rule, and because the guarantee that it is never zero is
-// the one worth being able to test.
+// A caller merging two ranked lists merges them with this, so the merge
+// agrees with each list's own order.
 pub fn compare(a: FuzzyRanked, b: FuzzyRanked, candidates: [Str], tie: FuzzyTie) -> Int []
-    todo("fuzzy-nv.fuzzyrank.compare")
+    if a.matched.score != b.matched.score
+        return b.matched.score - a.matched.score
+    let by_tie = match tie
+        FuzzyTieLength => str.len(candidates[a.index]) - str.len(candidates[b.index])
+        FuzzyTieBegin  => a.matched.start - b.matched.start
+        FuzzyTieEnd    => a.matched.end - b.matched.end
+        FuzzyTieIndex  => 0
+    if by_tie != 0
+        return by_tie
+    a.index - b.index
 
-// The best single result, or `None` when nothing matched.
+// The best single result, or `None` when nothing matched.  It is the
+// first result `rank` would answer with the same options.
 //
-// The call a command-line completion with one answer makes, and it
-// does not sort: the maximum under `compare` is one pass.
-pub fn best(p: fuzzypat.FuzzyPattern, candidates: [Str], o: FuzzyRankOptions) -> ?FuzzyRanked []
-    todo("fuzzy-nv.fuzzyrank.best")
+// One pass that keeps the least result under `compare`, with no sort.
+pub fn best(p: fuzzypat.FuzzyPattern, candidates: [Str],
+            options: FuzzyRankOptions) -> ?FuzzyRanked []
+    let o = if order_is_input(p)
+        input_order(options)
+    else
+        options
+    var top: ?FuzzyRanked = None
+    for i in 0..list.len(candidates)
+        if let Some(m) = fuzzyscore.match_at(p, candidates[i], o.bonus, o.scorer)
+            let r = FuzzyRanked { index: i, matched: m }
+            if m.score >= o.min_score
+                top = match top
+                    None    => Some(r)
+                    Some(t) => if compare(r, t, candidates, o.tie) < 0
+                        Some(r)
+                    else
+                        top
+    top
 
-// Whether the ranking would be the producer's own order, so a caller
-// can skip it entirely: true for an empty pattern and for one whose
-// atoms are all negated.
+// Whether a ranking would be the input's own order, so a caller can
+// skip it: true for an empty pattern and for one whose atoms are all
+// negated.
 pub fn order_is_input(p: fuzzypat.FuzzyPattern) -> Bool []
-    todo("fuzzy-nv.fuzzyrank.order_is_input")
+    fuzzypat.is_empty(p) or fuzzypat.is_filter_only(p)
+
+// The options with the tiebreak that keeps the input's order.
+fn input_order(o: FuzzyRankOptions) -> FuzzyRankOptions
+    FuzzyRankOptions { bonus: o.bonus, scorer: o.scorer, tie: FuzzyTieIndex, limit: o.limit,
+                       min_score: o.min_score }
+
+// Add `r` to the results kept so far.  With no limit it is appended
+// and the list is sorted once at the end.  With a limit the list is kept
+// sorted, `r` is inserted in its place, and the last result falls off
+// when the list would grow past the limit.
+fn keep(var kept: [FuzzyRanked], r: FuzzyRanked, candidates: [Str], o: FuzzyRankOptions)
+    if o.limit <= 0
+        list.push(kept, r)
+        return
+    let n = list.len(kept)
+    if n >= o.limit
+        if compare(r, kept[n - 1], candidates, o.tie) >= 0
+            return
+        kept[n - 1] = r
+    else
+        list.push(kept, r)
+    var at = list.len(kept) - 1
+    for _ in 1..list.len(kept)
+        if compare(kept[at], kept[at - 1], candidates, o.tie) >= 0
+            break
+        let held = kept[at - 1]
+        kept[at - 1] = kept[at]
+        kept[at] = held
+        at = at - 1
+
+// The kept results in order: already sorted under a limit, and merge
+// sorted otherwise.
+fn finish(kept: [FuzzyRanked], candidates: [Str], o: FuzzyRankOptions) -> [FuzzyRanked]
+    if o.limit > 0
+        return kept[:]
+    merge_sort(kept[:], candidates, o.tie)
+
+// A stable merge sort under `compare`.
+fn merge_sort(xs: [FuzzyRanked], candidates: [Str], tie: FuzzyTie) -> [FuzzyRanked]
+    let n = list.len(xs)
+    if n <= 1
+        return xs[:]
+    let left = merge_sort(xs[0:n / 2], candidates, tie)
+    let right = merge_sort(xs[n / 2:n], candidates, tie)
+    var out: [FuzzyRanked] = []
+    var i = 0
+    var j = 0
+    // Each step takes one result from one side, so the two lengths
+    // together are the number of steps.
+    for _ in 0..list.len(left) + list.len(right)
+        let take_left = j >= list.len(right)
+            or i < list.len(left) and compare(left[i], right[j], candidates, tie) <= 0
+        if take_left
+            list.push(out, left[i])
+            i = i + 1
+        else
+            list.push(out, right[j])
+            j = j + 1
+    out
