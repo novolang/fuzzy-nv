@@ -13,7 +13,3 @@ APIDOC.md
 # for when it grows a `main` and it does.
 /fuzzy-nv
 
-# The resolved dependency graph.  A library pins nothing for its
-# consumers — a consumer resolves its own — so the lock is a local
-# build artefact rather than a fact about the release.
-novo.lock
