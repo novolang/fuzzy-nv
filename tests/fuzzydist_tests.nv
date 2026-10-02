@@ -107,10 +107,10 @@ fn test_the_ratios_are_rapidfuzzs() [io]
     test.assert(fuzzydist.ratio("test", "this is a test string") < 0.5)
 
     test.case("token_sort_ratio makes a reordered name the same name")
-    test.assert(fuzzydist.token_sort_ratio("Klaus Hagen", "Hagen Klaus") > 0.99)
+    test.assert(fuzzydist.token_sort_ratio("Ada Lovelace", "Lovelace Ada") > 0.99)
 
     test.case("token_set_ratio survives an extra token")
-    test.assert(fuzzydist.token_set_ratio("Klaus Hagen", "Klaus H Hagen") > 0.99)
+    test.assert(fuzzydist.token_set_ratio("Ada Lovelace", "Ada K Lovelace") > 0.99)
 
     test.case("lcs_length and indel are the pieces underneath")
     test.assert(fuzzydist.lcs_length("abcde", "ace") == 3)

@@ -326,7 +326,7 @@ pub fn partial_ratio(needle: Str, haystack: Str) -> Float []
 
 // `ratio` over both strings' whitespace-separated tokens, each
 // lower-cased and sorted, then joined by one space.  rapidfuzz's
-// `token_sort_ratio`: `Klaus Hagen` and `Hagen Klaus` are the same name.
+// `token_sort_ratio`: `Ada Lovelace` and `Lovelace Ada` are the same name.
 pub fn token_sort_ratio(a: Str, b: Str) -> Float []
     ratio(str.join(sorted_tokens(a), " "), str.join(sorted_tokens(b), " "))
 
