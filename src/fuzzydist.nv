@@ -158,7 +158,7 @@ pub fn damerau(a: Str, b: Str) -> Int []
             let del = d[i * w + j + 1] + 1
             let trans = d[i1 * w + j1] + (i - i1 - 1) + 1 + (j - j1 - 1)
             d[(i + 1) * w + j + 1] = min3(sub, ins, (if del < trans then del else trans))
-        remember(seen_text, seen_row, x[i - 1], i)
+        remember(var seen_text, var seen_row, x[i - 1], i)
     d[(n + 1) * w + m + 1]
 
 // Optimal string alignment distance, or `None` when it is greater than

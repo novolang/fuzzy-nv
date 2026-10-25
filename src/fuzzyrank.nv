@@ -88,7 +88,7 @@ pub fn picker_options(limit: Int) -> FuzzyRankOptions []
 // ```
 pub fn rank(p: fuzzypat.FuzzyPattern, candidates: [Str], o: FuzzyRankOptions) -> [FuzzyRanked] []
     var out: [FuzzyRanked] = []
-    rank_into(out, p, candidates, o)
+    rank_into(var out, p, candidates, o)
 
 // Rank, appending the results to the caller's list, which is answered.
 // The results already in the list are left where they are.
@@ -106,7 +106,7 @@ pub fn rank_into(var out: [FuzzyRanked], p: fuzzypat.FuzzyPattern, candidates: [
     for i in 0..list.len(candidates)
         if let Some(m) = fuzzyscore.match_at(p, candidates[i], o.bonus, o.scorer)
             if m.score >= o.min_score
-                keep(kept, FuzzyRanked { index: i, matched: m }, candidates, o)
+                keep(var kept, FuzzyRanked { index: i, matched: m }, candidates, o)
     list.append(out, finish(kept, candidates, o))
     out
 
@@ -128,7 +128,7 @@ pub fn order(hits: [FuzzyRanked], candidates: [Str], o: FuzzyRankOptions) -> [Fu
     var kept: [FuzzyRanked] = []
     for h in hits
         if h.matched.score >= o.min_score
-            keep(kept, h, candidates, o)
+            keep(var kept, h, candidates, o)
     finish(kept, candidates, o)
 
 // Compare two results under the ordering rule: negative when `a` comes

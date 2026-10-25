@@ -1,6 +1,6 @@
 [package]
 name        = "fuzzy-nv"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "fzf's subsequence matching: a needle compiled once into a pattern with fzf's extended search syntax and smart case; fzf's bonus table as a value a caller can replace; a fast scorer and an exact one; a score without positions for ranking and positions on demand for highlighting, always on grapheme-cluster boundaries; a total ranking with fzf's tiebreaks; and the classic string distances, each with a bounded form."
 license     = "Apache-2.0"
 
@@ -20,7 +20,7 @@ repository  = "https://github.com/novolang/fuzzy-nv"
 maintainers = ["novo-lang"]
 # 0.13.0 is the first toolchain with lists as reference types and `var`
 # parameters, which `positions_into` and `rank_into` write through.
-novo        = ">= 0.13.0"
+novo        = ">= 0.21.1"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.

@@ -205,7 +205,7 @@ fn test_positions_are_a_second_call_and_every_one_is_a_cluster_boundary() [io]
 
     test.case("positions_into appends to the caller's own list")
     var seed: [Int] = [99]
-    let grown = fuzzyscore.positions_into(seed, p("fz"), "fuzzy.nv", b, FuzzyScorerV2)
+    let grown = fuzzyscore.positions_into(var seed, p("fz"), "fuzzy.nv", b, FuzzyScorerV2)
     test.assert(same(grown, [99, 0, 2]))
     test.assert(same(seed, [99, 0, 2]))
 

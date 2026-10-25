@@ -149,7 +149,7 @@ pub fn symbol_bonus() -> FuzzyBonus []
 pub fn match_at(p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus,
                 scorer: FuzzyScorer) -> ?FuzzyMatch []
     var none: [Int] = []
-    match_pattern(p, candidate, bonus, scorer, false, none)
+    match_pattern(p, candidate, bonus, scorer, false, var none)
 
 // Whether a candidate satisfies the pattern, with no score computed.
 //
@@ -185,14 +185,14 @@ pub fn matches(p: fuzzypat.FuzzyPattern, candidate: Str) -> Bool []
 pub fn positions_of(p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus,
                     scorer: FuzzyScorer) -> [Int] []
     var out: [Int] = []
-    positions_into(out, p, candidate, bonus, scorer)
+    positions_into(var out, p, candidate, bonus, scorer)
 
 // The same offsets, appended to the caller's list, which is answered.
 // Nothing is appended when the candidate does not match.
 pub fn positions_into(var out: [Int], p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus,
                       scorer: FuzzyScorer) -> [Int] []
     var found: [Int] = []
-    if match_pattern(p, candidate, bonus, scorer, true, found) != None
+    if match_pattern(p, candidate, bonus, scorer, true, var found) != None
         list.sort(found)
         var last = 0 - 1
         for at in found
@@ -219,7 +219,7 @@ pub fn to_cluster_indices(candidate: Str, positions: [Int]) -> [Int] []
 pub fn match_atom(a: fuzzypat.FuzzyAtom, candidate: Str, case: fuzzypat.FuzzyCase,
                   bonus: FuzzyBonus, scorer: FuzzyScorer) -> ?FuzzyMatch []
     var none: [Int] = []
-    score_atom(a, candidate, case, bonus, scorer, false, none)
+    score_atom(a, candidate, case, bonus, scorer, false, var none)
 
 // The bonus a match at byte offset `at` would earn in `candidate`, from
 // the cluster at `at` and the one before it, as the module comment
@@ -341,7 +341,7 @@ fn match_pattern(p: fuzzypat.FuzzyPattern, candidate: Str, bonus: FuzzyBonus, sc
                     satisfied = true
                 continue
             var at: [Int] = []
-            if let Some(m) = score_atom(a, candidate, p.effective_case, bonus, scorer, want, at)
+            if let Some(m) = score_atom(a, candidate, p.effective_case, bonus, scorer, want, var at)
                 let better = match best
                     None    => true
                     Some(b) => m.score > b.score
@@ -385,16 +385,16 @@ fn score_atom(a: fuzzypat.FuzzyAtom, cand: Str, case: fuzzypat.FuzzyCase, b: Fuz
     match a.kind
         FuzzyAtomFuzzy =>
             match scorer
-                FuzzyScorerV2    => fuzzy_fast(a.needle, nb, cand, case, b, want, out)
-                FuzzyScorerExact => fuzzy_exact(a.needle, nb, cand, case, b, want, out)
+                FuzzyScorerV2    => fuzzy_fast(a.needle, nb, cand, case, b, want, var out)
+                FuzzyScorerExact => fuzzy_exact(a.needle, nb, cand, case, b, want, var out)
         FuzzyAtomExact =>
-            literal_best(a.needle, nb, cand, case, b, want, out)
+            literal_best(a.needle, nb, cand, case, b, want, var out)
         _              =>
             let s = anchored_start(a, nb, cand, case)
             if s < 0
                 return None
             let e = literal_end(a.needle, nb, cand, s, case)
-            Some(FuzzyMatch { score: score_greedy(a.needle, nb, cand, s, e, case, b, want, out),
+            Some(FuzzyMatch { score: score_greedy(a.needle, nb, cand, s, e, case, b, want, var out),
                               start: s, end: e })
 
 // The offset one past the cluster that completes the first subsequence
@@ -435,7 +435,7 @@ fn fuzzy_fast(needle: Str, nb: [Int], cand: Str, case: fuzzypat.FuzzyCase, b: Fu
             at = before
             if held
                 break
-    Some(FuzzyMatch { score: score_greedy(needle, nb, cand, at, end, case, b, want, out),
+    Some(FuzzyMatch { score: score_greedy(needle, nb, cand, at, end, case, b, want, var out),
                       start: at, end: end })
 
 // fzf's `calculateScore`: match the needle's clusters from the left
@@ -530,7 +530,7 @@ fn literal_best(needle: Str, nb: [Int], cand: Str, case: fuzzypat.FuzzyCase, b: 
             break
         let e = literal_end(needle, nb, cand, at, case)
         if e >= 0
-            let s = score_greedy(needle, nb, cand, at, e, case, b, false, none)
+            let s = score_greedy(needle, nb, cand, at, e, case, b, false, var none)
             let better = match best
                 None    => true
                 Some(m) => s > m.score
@@ -539,7 +539,7 @@ fn literal_best(needle: Str, nb: [Int], cand: Str, case: fuzzypat.FuzzyCase, b: 
         at = ugrapheme.next_boundary(cand, at)
     if want
         if let Some(m) = best
-            let _ = score_greedy(needle, nb, cand, m.start, m.end, case, b, true, out)
+            let _ = score_greedy(needle, nb, cand, m.start, m.end, case, b, true, var out)
     best
 
 // Where a prefix, suffix or whole-candidate atom starts in `cand`, or

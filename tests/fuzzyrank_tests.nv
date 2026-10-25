@@ -124,7 +124,7 @@ fn test_a_caller_can_bring_its_own_scores_and_its_own_list() [io]
 
     test.case("rank_into appends to the caller's result list")
     var seed: [FuzzyRanked] = []
-    let grown = fuzzyrank.rank_into(seed, pat("man"), corpus(), o)
+    let grown = fuzzyrank.rank_into(var seed, pat("man"), corpus(), o)
     test.assert(list.len(grown) == 4)
 
     test.case("order applies the rule to results a producer scored itself")
